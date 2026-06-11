@@ -41,7 +41,7 @@ if USE_NEW_SDK:
     gemini_client = genai.Client(api_key=GEMINI_KEY)
 else:
     genai_old.configure(api_key=GEMINI_KEY)
-    gemini_model = genai_old.GenerativeModel("gemini-2.0-flash")
+    gemini_model = genai_old.GenerativeModel("gemini-2.0-flash-lite")
 
 # ── Telegram Bot с поддержкой прокси ─────────────────────
 TELEGRAM_API_SERVER = os.getenv("TELEGRAM_API_SERVER", "")
@@ -91,7 +91,7 @@ async def recognize_invoice(image_bytes: bytes) -> dict:
 
     if USE_NEW_SDK:
         response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.0-flash-lite",
             contents=[PROMPT, img]
         )
         text = response.text.strip()
