@@ -13,6 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from dotenv import load_dotenv
 
 try:
@@ -43,7 +44,13 @@ else:
     gemini_model = genai_old.GenerativeModel("gemini-1.5-flash")
 
 # ── Telegram Bot с поддержкой прокси ─────────────────────
-if PROXY_URL:
+TELEGRAM_API_SERVER = os.getenv("TELEGRAM_API_SERVER", "")
+
+if TELEGRAM_API_SERVER:
+    server = TelegramAPIServer.from_base(TELEGRAM_API_SERVER)
+    bot = Bot(token=TELEGRAM_TOKEN, session=AiohttpSession(api=server))
+    logger.info(f"Используем API сервер: {TELEGRAM_API_SERVER}")
+elif PROXY_URL:
     session = AiohttpSession(proxy=PROXY_URL)
     bot = Bot(token=TELEGRAM_TOKEN, session=session)
     logger.info(f"Используем прокси: {PROXY_URL}")
