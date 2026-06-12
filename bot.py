@@ -71,7 +71,7 @@ PROMPT = """Ты помощник по распознаванию рукопис
 async def recognize_invoice(image_bytes: bytes) -> dict:
     img_b64 = base64.standard_b64encode(image_bytes).decode()
     payload = {
-        "model": "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "model": "nvidia/nemotron-nano-12b-v2-vl:free",
         "messages": [{
             "role": "user",
             "content": [
