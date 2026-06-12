@@ -71,7 +71,7 @@ PROMPT = """Ты помощник по распознаванию рукопис
 async def recognize_invoice(image_bytes: bytes) -> dict:
     img_b64 = base64.standard_b64encode(image_bytes).decode()
     payload = {
-        "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+        "model": "google/gemini-2.5-flash-preview:free",
         "messages": [{
             "role": "user",
             "content": [
