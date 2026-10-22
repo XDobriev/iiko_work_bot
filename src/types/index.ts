@@ -3,21 +3,38 @@ import { z } from 'zod';
 export type WarehouseType = 'kitchen' | 'household';
 
 export const InvoiceItemSchema = z.object({
-  name: z.string().min(1),
-  qty: z.number().nonnegative(),
-  price: z.number().nonnegative(),
-  sum: z.number().nonnegative(),
+  name: z.preprocess((val) => String(val || 'Товар').trim(), z.string().min(1)),
+  qty: z.preprocess((val) => {
+    const n = Number(val);
+    return isNaN(n) ? 1 : Math.max(0, n);
+  }, z.number().nonnegative().default(1)),
+  price: z.preprocess((val) => {
+    const n = Number(val);
+    return isNaN(n) ? 0 : Math.max(0, n);
+  }, z.number().nonnegative().default(0)),
+  sum: z.preprocess((val) => {
+    const n = Number(val);
+    return isNaN(n) ? 0 : Math.max(0, n);
+  }, z.number().nonnegative().default(0)),
   unit: z.string().optional()
 });
 
 export type InvoiceItem = z.infer<typeof InvoiceItemSchema>;
 
 export const InvoiceDataSchema = z.object({
-  date: z.string().default(''),
-  supplier: z.string().default('Не указан'),
-  warehouse: z.enum(['kitchen', 'household']).default('kitchen'),
-  items: z.array(InvoiceItemSchema).default([]),
-  total_written: z.number().nullable().optional().default(null),
+  date: z.preprocess((val) => (val == null ? '' : String(val).trim()), z.string().default('')),
+  supplier: z.preprocess((val) => (val == null || !String(val).trim() ? 'Не указан' : String(val).trim()), z.string().default('Не указан')),
+  warehouse: z.preprocess((val) => {
+    const s = String(val || '').toLowerCase();
+    if (s.includes('house') || s.includes('хоз')) return 'household';
+    return 'kitchen';
+  }, z.enum(['kitchen', 'household']).default('kitchen')),
+  items: z.preprocess((val) => (Array.isArray(val) ? val : []), z.array(InvoiceItemSchema).default([])),
+  total_written: z.preprocess((val) => {
+    if (val == null) return null;
+    const n = Number(val);
+    return isNaN(n) ? null : n;
+  }, z.number().nullable().default(null)),
   notes: z.string().optional()
 });
 

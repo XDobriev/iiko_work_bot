@@ -1,5 +1,12 @@
 import { InvoiceData, HistoricalComparison } from '../types/index.js';
 
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export function formatInvoiceMessage(
   invoiceId: number,
   data: InvoiceData,
@@ -10,23 +17,23 @@ export function formatInvoiceMessage(
   const whName = isHousehold ? 'Хоз склад' : 'Склад Кухня';
 
   const lines: string[] = [
-    `📋 *Накладная #${invoiceId}*`,
-    `📅 *Дата:* \`${data.date || 'Не указана'}\`  |  🚛 *Поставщик:* \`${data.supplier || 'Не указан'}\``,
-    `🏭 *Склад:* ${whIcon} \`${whName}\``,
+    `📋 <b>Накладная #${invoiceId}</b>`,
+    `📅 <b>Дата:</b> <code>${escapeHtml(data.date || 'Не указана')}</code>  |  🚛 <b>Поставщик:</b> <code>${escapeHtml(data.supplier || 'Не указан')}</code>`,
+    `🏭 <b>Склад:</b> ${whIcon} <code>${escapeHtml(whName)}</code>`,
     ''
   ];
 
   // Duplicate warning
   if (comparison.isDuplicate) {
     lines.push(
-      `⚠️ *ВНИМАНИЕ: Возможный дубликат!*\nНакладная от этого поставщика за эту дату уже загружена (ранее ID #${comparison.duplicateInvoiceId}).\n`
+      `⚠️ <b>ВНИМАНИЕ: Возможный дубликат!</b>\nНакладная от этого поставщика за эту дату уже загружена (ранее ID #${comparison.duplicateInvoiceId}).\n`
     );
   }
 
-  // Monospace Table Header
-  lines.push('```');
-  lines.push('#  Наименование         Кол    Цена   Сумма');
-  lines.push('─────────────────────────────────────────────');
+  // Preformatted Monospace Table
+  const tableLines: string[] = [];
+  tableLines.push('#  Наименование         Кол    Цена   Сумма');
+  tableLines.push('─────────────────────────────────────────────');
 
   let calcTotal = 0;
   for (let i = 0; i < data.items.length; i++) {
@@ -35,7 +42,6 @@ export function formatInvoiceMessage(
     calcTotal += itemSum;
 
     const num = (i + 1).toString().padEnd(2, ' ');
-    // Truncate name cleanly
     let name = item.name.length > 18 ? item.name.substring(0, 16) + '..' : item.name;
     name = name.padEnd(18, ' ');
 
@@ -43,32 +49,33 @@ export function formatInvoiceMessage(
     const price = Math.round(item.price).toString().padStart(6, ' ');
     const sum = Math.round(itemSum).toString().padStart(7, ' ');
 
-    lines.push(`${num} ${name} ${qty} ${price} ${sum}`);
+    tableLines.push(`${num} ${name} ${qty} ${price} ${sum}`);
   }
 
-  lines.push('─────────────────────────────────────────────');
-  lines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
-  lines.push('```');
+  tableLines.push('─────────────────────────────────────────────');
+  tableLines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
+
+  lines.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
 
   // Math discrepancy
   if (comparison.mathDiscrepancy && data.total_written != null) {
     lines.push(
-      `⚠️ *Расхождение в сумме!*\nНа чеке написано от руки: *${Math.round(data.total_written)} ₽*, а сумма позиций: *${Math.round(calcTotal)} ₽* (разница: ${Math.round(comparison.discrepancyDiff)} ₽).`
+      `⚠️ <b>Расхождение в сумме!</b>\nНа чеке написано от руки: <b>${Math.round(data.total_written)} ₽</b>, а сумма позиций: <b>${Math.round(calcTotal)} ₽</b> (разница: ${Math.round(comparison.discrepancyDiff)} ₽).`
     );
   }
 
   // Price history insights
   const changedPrices = comparison.priceComparisons.filter(c => c.trend === 'up' || c.trend === 'down');
   if (changedPrices.length > 0) {
-    lines.push('\n📊 *Сверка с предыдущими ценами:*');
+    lines.push('\n📊 <b>Сверка с предыдущими ценами:</b>');
     for (const cp of changedPrices) {
       if (cp.trend === 'up') {
         lines.push(
-          `🔺 *${cp.name}*: *${cp.currentPrice} ₽* (+${cp.deltaRub} ₽ / +${cp.deltaPercent}% к ${cp.previousDate || 'прошлому разу'})`
+          `🔺 <b>${escapeHtml(cp.name)}</b>: <b>${cp.currentPrice} ₽</b> (+${cp.deltaRub} ₽ / +${cp.deltaPercent}% к ${escapeHtml(cp.previousDate || 'прошлому разу')})`
         );
       } else if (cp.trend === 'down') {
         lines.push(
-          `🔻 *${cp.name}*: *${cp.currentPrice} ₽* (${cp.deltaRub} ₽ / ${cp.deltaPercent}% к ${cp.previousDate || 'прошлому разу'})`
+          `🔻 <b>${escapeHtml(cp.name)}</b>: <b>${cp.currentPrice} ₽</b> (${cp.deltaRub} ₽ / ${cp.deltaPercent}% к ${escapeHtml(cp.previousDate || 'прошлому разу')})`
         );
       }
     }
