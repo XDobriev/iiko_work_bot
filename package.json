@@ -1,0 +1,23 @@
+{
+  "name": "iiko-work-bot",
+  "version": "2.0.0",
+  "description": "Telegram bot for handwritten invoice recognition via Gemini 3.8 Flash, historical price checking, and iiko integration",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test:pipeline": "tsx src/scripts/test-pipeline.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
