@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { GeminiInvoiceRecognizer } from '../gemini/recognizer.js';
 import { InvoicesRepository } from '../db/invoices.repo.js';
 import { IikoClient } from '../iiko/client.js';
-import { formatInvoiceMessage } from './formatter.js';
+import { formatInvoiceMessage, escapeHtml } from './formatter.js';
 
 export function createBot(): Bot {
   if (!config.telegram.token) {
@@ -19,7 +19,7 @@ export function createBot(): Bot {
   bot.use(async (ctx, next) => {
     const allowed = config.telegram.allowedUserIds;
     if (allowed.length > 0 && ctx.from && !allowed.includes(ctx.from.id)) {
-      await ctx.reply('⛔ Доступ ограничен. Ваш ID: `' + ctx.from.id + '`', { parse_mode: 'Markdown' });
+      await ctx.reply(`⛔ Доступ ограничен. Ваш ID: <code>${ctx.from.id}</code>`, { parse_mode: 'HTML' });
       return;
     }
     await next();
@@ -28,29 +28,29 @@ export function createBot(): Bot {
   // /start command
   bot.command('start', async (ctx) => {
     await ctx.reply(
-      '👋 *Привет!*\n\n' +
+      '👋 <b>Привет!</b>\n\n' +
       'Я бот для распознавания рукописных накладных ресторана с интеграцией в iiko.\n\n' +
-      '📸 *Как пользоваться:*\n' +
+      '📸 <b>Как пользоваться:</b>\n' +
       '1. Отправь фото накладной (можно сразу несколько подряд).\n' +
-      '2. Нейросеть *Gemini 3.8 Flash* распознает наименования, цены, количества и склад.\n' +
+      '2. Нейросеть <b>Gemini 3.8 Flash</b> распознает наименования, цены, количества и склад.\n' +
       '3. Бот сверит цены с предыдущими закупками из базы данных и предупредит о подорожании или дубликатах.\n' +
-      '4. Нажми кнопку *[✅ Создать в iiko]* для проведения документа.\n\n' +
-      'Команды:\n' +
+      '4. Нажми кнопку <b>[✅ Создать в iiko]</b> для проведения документа.\n\n' +
+      '<b>Команды:</b>\n' +
       '/history — последние 10 накладных\n' +
       '/help — справка по возможностям',
-      { parse_mode: 'Markdown' }
+      { parse_mode: 'HTML' }
     );
   });
 
   // /help command
   bot.command('help', async (ctx) => {
     await ctx.reply(
-      'ℹ️ *Справка по боту:*\n\n' +
-      '• *Распознавание:* Модель Gemini 3.8 Flash обучена на контексте ваших постоянных позиций и поставщиков.\n' +
-      '• *База данных:* Сохраняет каждую позицию и отслеживает изменение цен.\n' +
-      '• *Склады:* Кухня (продукты) и Хоз склад (бытовая химия, расходники) определяются автоматически.\n' +
-      '• *iiko:* Создает приходную накладную через iiko Cloud API.',
-      { parse_mode: 'Markdown' }
+      'ℹ️ <b>Справка по боту:</b>\n\n' +
+      '• <b>Распознавание:</b> Модель Gemini 3.8 Flash использует историю ранее введенных товаров и поставщиков.\n' +
+      '• <b>База данных SQLite:</b> Сохраняет каждую позицию и отслеживает изменение цен.\n' +
+      '• <b>Склады:</b> Кухня (продукты) и Хоз склад (бытовая химия, расходники) определяются автоматически.\n' +
+      '• <b>iiko:</b> Создает приходную накладную через iiko Cloud API.',
+      { parse_mode: 'HTML' }
     );
   });
 
@@ -62,25 +62,25 @@ export function createBot(): Bot {
       return;
     }
 
-    const lines = ['📜 *История последних накладных:*', ''];
+    const lines = ['📜 <b>История последних накладных:</b>', ''];
     for (const inv of recent) {
       let statusIcon = '⏳';
       if (inv.status === 'synced') statusIcon = '✅';
       else if (inv.status === 'rejected') statusIcon = '❌';
 
-      const docInfo = inv.iiko_document_id ? ` (iiko #${inv.iiko_document_id})` : '';
+      const docInfo = inv.iiko_document_id ? ` (iiko #${escapeHtml(inv.iiko_document_id)})` : '';
       lines.push(
-        `${statusIcon} *#${inv.id}* | ${inv.date} | *${inv.supplier}* | ${Math.round(inv.total_calculated)} ₽${docInfo}`
+        `${statusIcon} <b>#${inv.id}</b> | ${escapeHtml(inv.date)} | <b>${escapeHtml(inv.supplier)}</b> | ${Math.round(inv.total_calculated)} ₽${docInfo}`
       );
     }
 
-    await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
   });
 
   // Photo message handler
   bot.on('message:photo', async (ctx) => {
-    const statusMsg = await ctx.reply('🔍 _Распознаю накладную через Gemini 3.8 Flash..._', {
-      parse_mode: 'Markdown'
+    const statusMsg = await ctx.reply('🔍 <i>Распознаю накладную через Gemini 3.8 Flash...</i>', {
+      parse_mode: 'HTML'
     });
 
     try {
@@ -131,7 +131,7 @@ export function createBot(): Bot {
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
       await ctx.reply(cardText, {
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
         reply_markup: keyboard
       });
     } catch (err: any) {
@@ -140,11 +140,11 @@ export function createBot(): Bot {
         await ctx.api.editMessageText(
           ctx.chat.id,
           statusMsg.message_id,
-          `❌ *Ошибка распознавания:* ${err.message || err}`,
-          { parse_mode: 'Markdown' }
+          `❌ <b>Ошибка распознавания:</b> ${escapeHtml(err.message || String(err))}`,
+          { parse_mode: 'HTML' }
         );
       } catch {
-        await ctx.reply(`❌ *Ошибка:* ${err.message || err}`, { parse_mode: 'Markdown' });
+        await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
       }
     }
   });
@@ -193,21 +193,21 @@ export function createBot(): Bot {
         repo.updateInvoiceStatus(invoiceId, 'synced', result.documentNumber);
 
         const currentText = ctx.callbackQuery.message?.text || '';
-        const modeNotice = result.isMock ? ' _(демо-режим без пароля iiko)_' : '';
-        const updatedText = `${currentText}\n\n✅ *Создано в iiko!* Номер: \`${result.documentNumber}\`${modeNotice}\n_Зайдите в iiko и нажмите «Провести»._`;
+        const modeNotice = result.isMock ? ' <i>(демо-режим)</i>' : '';
+        const updatedText = `${escapeHtml(currentText)}\n\n✅ <b>Создано в iiko!</b> Номер: <code>${escapeHtml(result.documentNumber || '')}</code>${modeNotice}\n<i>Зайдите в iiko и нажмите «Провести».</i>`;
 
         try {
           await ctx.editMessageText(updatedText, {
-            parse_mode: 'Markdown',
+            parse_mode: 'HTML',
             reply_markup: undefined // Remove buttons
           });
         } catch {
-          await ctx.reply(`✅ *Накладная #${invoiceId} создана в iiko!*\nНомер: \`${result.documentNumber}\``, {
-            parse_mode: 'Markdown'
+          await ctx.reply(`✅ <b>Накладная #${invoiceId} создана в iiko!</b>\nНомер: <code>${escapeHtml(result.documentNumber || '')}</code>`, {
+            parse_mode: 'HTML'
           });
         }
       } else {
-        await ctx.reply(`⚠️ *Ошибка iiko:* ${result.message}`, { parse_mode: 'Markdown' });
+        await ctx.reply(`⚠️ <b>Ошибка iiko:</b> ${escapeHtml(result.message || 'Неизвестная ошибка')}`, { parse_mode: 'HTML' });
       }
     } else if (action === 'reject') {
       repo.updateInvoiceStatus(invoiceId, 'rejected');
@@ -215,12 +215,12 @@ export function createBot(): Bot {
 
       const currentText = ctx.callbackQuery.message?.text || '';
       try {
-        await ctx.editMessageText(`${currentText}\n\n❌ *Накладная отклонена.*`, {
-          parse_mode: 'Markdown',
+        await ctx.editMessageText(`${escapeHtml(currentText)}\n\n❌ <b>Накладная отклонена.</b>`, {
+          parse_mode: 'HTML',
           reply_markup: undefined
         });
       } catch {
-        await ctx.reply(`❌ *Накладная #${invoiceId} отклонена.*`, { parse_mode: 'Markdown' });
+        await ctx.reply(`❌ <b>Накладная #${invoiceId} отклонена.</b>`, { parse_mode: 'HTML' });
       }
     }
   });
