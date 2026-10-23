@@ -64,6 +64,7 @@ export interface InvoiceItemRecord {
   qty: number;
   price: number;
   sum: number;
+  unit?: string;
   created_at: string;
 }
 
@@ -72,11 +73,20 @@ export interface PriceComparisonItem {
   currentPrice: number;
   currentQty: number;
   currentSum: number;
+  currentUnit?: string;
   previousPrice: number | null;
   previousDate: string | null;
+  previousUnit?: string | null;
   deltaRub: number | null;
   deltaPercent: number | null;
   trend: 'up' | 'down' | 'same' | 'new';
+  isAnomaly?: boolean;
+  anomalyMessage?: string;
+}
+
+export interface KnownItemWithUnit {
+  name: string;
+  unit?: string;
 }
 
 export interface HistoricalComparison {
