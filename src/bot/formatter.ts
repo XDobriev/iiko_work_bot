@@ -59,7 +59,12 @@ export function formatInvoiceMessage(
   tableLines.push('──────────────────────────────────────────────');
   tableLines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
 
-  lines.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
+  const preTable = `<pre>${escapeHtml(tableLines.join('\n'))}</pre>`;
+  if (data.items.length >= 4) {
+    lines.push(`<blockquote expandable>${preTable}</blockquote>`);
+  } else {
+    lines.push(preTable);
+  }
 
   // Math discrepancy
   if (comparison.mathDiscrepancy && data.total_written != null) {
@@ -71,27 +76,37 @@ export function formatInvoiceMessage(
   // Unit / Packaging Anomalies
   const anomalies = comparison.priceComparisons.filter(c => c.isAnomaly && c.anomalyMessage);
   if (anomalies.length > 0) {
-    lines.push('\n🔍 <b>Внимание: проверка фасовки / тары:</b>');
+    const anomalyLines: string[] = ['🔍 <b>Внимание: проверка фасовки / тары:</b>'];
     for (const a of anomalies) {
-      lines.push(`⚠️ <b>${escapeHtml(a.name)}</b>: ${escapeHtml(a.anomalyMessage || '')}`);
+      anomalyLines.push(`⚠️ <b>${escapeHtml(a.name)}</b>: ${escapeHtml(a.anomalyMessage || '')}`);
+    }
+    if (anomalies.length >= 2) {
+      lines.push(`<blockquote expandable>\n${anomalyLines.join('\n')}\n</blockquote>`);
+    } else {
+      lines.push('\n' + anomalyLines.join('\n'));
     }
   }
 
   // Price history insights (excluding anomalies already reported if needed, or including trends)
   const changedPrices = comparison.priceComparisons.filter(c => (c.trend === 'up' || c.trend === 'down') && !c.isAnomaly);
   if (changedPrices.length > 0) {
-    lines.push('\n📊 <b>Сверка с предыдущими ценами:</b>');
+    const priceLines: string[] = ['📊 <b>Сверка с предыдущими ценами:</b>'];
     for (const cp of changedPrices) {
       const uStr = cp.currentUnit ? `/${cp.currentUnit}` : '';
       if (cp.trend === 'up') {
-        lines.push(
+        priceLines.push(
           `🔺 <b>${escapeHtml(cp.name)}</b>: <b>${cp.currentPrice} ₽${uStr}</b> (+${cp.deltaRub} ₽ / +${cp.deltaPercent}% к ${escapeHtml(cp.previousDate || 'прошлому разу')})`
         );
       } else if (cp.trend === 'down') {
-        lines.push(
+        priceLines.push(
           `🔻 <b>${escapeHtml(cp.name)}</b>: <b>${cp.currentPrice} ₽${uStr}</b> (${cp.deltaRub} ₽ / ${cp.deltaPercent}% к ${escapeHtml(cp.previousDate || 'прошлому разу')})`
         );
       }
+    }
+    if (changedPrices.length >= 2) {
+      lines.push(`<blockquote expandable>\n${priceLines.join('\n')}\n</blockquote>`);
+    } else {
+      lines.push('\n' + priceLines.join('\n'));
     }
   }
 
@@ -110,12 +125,20 @@ export function formatDailyStats(stats: DailyStats): string {
     `💰 Общая сумма закупок: <b>${stats.totalSpend.toLocaleString('ru-RU')} ₽</b>`,
     `   🍽 Кухня (продукты): <b>${stats.kitchenSpend.toLocaleString('ru-RU')} ₽</b>`,
     `   🏠 Хоз склад: <b>${stats.householdSpend.toLocaleString('ru-RU')} ₽</b>`,
-    '',
-    '🚛 <b>Поставщики за сегодня:</b>'
+    ''
   ];
 
-  for (const s of stats.suppliers) {
-    lines.push(`• <b>${escapeHtml(s.supplier)}</b>: ${s.count} накл. на <b>${s.total.toLocaleString('ru-RU')} ₽</b>`);
+  if (stats.suppliers.length >= 3) {
+    const suppLines = ['🚛 <b>Поставщики за сегодня:</b>'];
+    for (const s of stats.suppliers) {
+      suppLines.push(`• <b>${escapeHtml(s.supplier)}</b>: ${s.count} накл. на <b>${s.total.toLocaleString('ru-RU')} ₽</b>`);
+    }
+    lines.push(`<blockquote expandable>\n${suppLines.join('\n')}\n</blockquote>`);
+  } else if (stats.suppliers.length > 0) {
+    lines.push('🚛 <b>Поставщики за сегодня:</b>');
+    for (const s of stats.suppliers) {
+      lines.push(`• <b>${escapeHtml(s.supplier)}</b>: ${s.count} накл. на <b>${s.total.toLocaleString('ru-RU')} ₽</b>`);
+    }
   }
 
   return lines.join('\n');

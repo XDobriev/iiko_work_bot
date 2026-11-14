@@ -1,5 +1,7 @@
 import { config } from '../config.js';
 import { InvoiceData } from '../types/index.js';
+import { ProductCatalogMatcher, CatalogProduct, normalizeIikoName, tokenizeName } from './matcher.js';
+import { InvoicesRepository } from '../db/invoices.repo.js';
 
 export interface IikoCreateInvoiceResult {
   success: boolean;
@@ -8,6 +10,7 @@ export interface IikoCreateInvoiceResult {
   isMock?: boolean;
   message?: string;
   unmatched?: string[];
+  unitWarnings?: string[];
   raw?: any;
 }
 
@@ -23,13 +26,6 @@ interface IikoStorage {
   deleted?: boolean;
 }
 
-interface IikoProductShort {
-  id: string;
-  name: string;
-  type: string;
-  isDeleted?: boolean;
-}
-
 const SESSION_TTL_MS = 15 * 60 * 1000;
 
 // iikoWeb answers 500 on Node's default "Accept-Language: *", so a concrete locale is required.
@@ -38,18 +34,6 @@ const BASE_HEADERS: Record<string, string> = {
   Accept: 'application/json',
   'Accept-Language': 'ru-RU'
 };
-
-/**
- * Normalizes names for matching: drops type tags like "|ПФ|", "*", punctuation and case.
- */
-function normalizeIikoName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\|[^|]*\|/g, ' ')
-    .replace(/[*«»"'()[\],.:;!?-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 /**
  * Client for the iikoWeb public API (https://<domain>.iikoweb.ru/api/...).
@@ -62,11 +46,13 @@ export class IikoClient {
   private password?: string;
   private cookie: string | null = null;
   private cookieExpiresAt = 0;
+  private repo?: InvoicesRepository;
 
-  constructor() {
+  constructor(repo?: InvoicesRepository) {
     this.url = config.iiko.url;
     this.login = config.iiko.login;
     this.password = config.iiko.password;
+    this.repo = repo;
   }
 
   isConfigured(): boolean {
@@ -155,8 +141,8 @@ export class IikoClient {
     return (res.data || []).filter(s => !s.deleted);
   }
 
-  async getProducts(): Promise<IikoProductShort[]> {
-    const res = await this.request<IikoProductShort[]>('/api/documents/product/short_list');
+  async getProducts(): Promise<CatalogProduct[]> {
+    const res = await this.request<CatalogProduct[]>('/api/documents/product/short_list');
     return res.filter(p => !p.isDeleted && p.type !== 'MODIFIER');
   }
 
@@ -166,20 +152,48 @@ export class IikoClient {
     return (all.find(c => c.code === 'no_concept') || all[0])?.id;
   }
 
-  private findByName<T extends { name: string }>(list: T[], rawName: string): T | undefined {
+  findEntityByName<T extends { name: string }>(list: T[], rawName: string): T | undefined {
     const wanted = normalizeIikoName(rawName);
     if (!wanted) return undefined;
 
     const exact = list.find(x => normalizeIikoName(x.name) === wanted);
     if (exact) return exact;
 
-    // Fallback: closest containing match (shortest name wins)
-    return list
-      .filter(x => {
-        const n = normalizeIikoName(x.name);
-        return n.includes(wanted) || wanted.includes(n);
-      })
-      .sort((a, b) => a.name.length - b.name.length)[0];
+    // Filter out legal entity prefixes and single-letter prepositions/conjunctions
+    const stopWords = new Set(['ооо', 'зао', 'оао', 'пао', 'ип', 'и', 'в', 'на', 'с', 'по', 'к', 'о', 'от']);
+    const allQueryTokens = tokenizeName(rawName);
+    const queryTokens = allQueryTokens.filter(t => !stopWords.has(t));
+    const effectiveQueryTokens = queryTokens.length > 0 ? queryTokens : allQueryTokens;
+
+    let best: T | undefined;
+    let bestScore = 0;
+
+    for (const item of list) {
+      const allCandTokens = tokenizeName(item.name);
+      const candTokens = allCandTokens.filter(t => !stopWords.has(t));
+      const effectiveCandTokens = candTokens.length > 0 ? candTokens : allCandTokens;
+
+      let matches = 0;
+      for (const qt of effectiveQueryTokens) {
+        if (effectiveCandTokens.includes(qt)) {
+          matches += 1;
+        } else if (
+          effectiveCandTokens.some(ct => {
+            const minLen = Math.min(ct.length, qt.length);
+            return minLen >= 3 && (ct.startsWith(qt) || qt.startsWith(ct)) && Math.abs(ct.length - qt.length) <= 3;
+          })
+        ) {
+          matches += 0.85;
+        }
+      }
+      const score = effectiveQueryTokens.length > 0 ? matches / effectiveQueryTokens.length : 0;
+      if (score > bestScore) {
+        bestScore = score;
+        best = item;
+      }
+    }
+
+    return bestScore >= 0.5 ? best : undefined;
   }
 
   private parseDate(date?: string): string {
@@ -211,7 +225,7 @@ export class IikoClient {
         this.getDefaultConceptionId()
       ]);
 
-      const supplier = this.findByName(suppliers, invoice.supplier || '');
+      const supplier = this.findEntityByName(suppliers, invoice.supplier || '');
       if (!supplier) {
         return {
           success: false,
@@ -226,22 +240,36 @@ export class IikoClient {
         return { success: false, message: 'В iiko не найдено ни одного склада.' };
       }
 
+      const matcher = new ProductCatalogMatcher(products, this.repo);
       const matched: Array<{ productId: string; qty: number; price: number; sum: number }> = [];
       const unmatched: string[] = [];
+      const unitWarnings: string[] = [];
+
       for (const item of invoice.items) {
-        const product = this.findByName(products, item.name);
-        if (!product) {
+        const match = matcher.match(item.name, item.unit);
+        if (!match) {
           unmatched.push(item.name);
           continue;
         }
+
+        if (match.unitMismatch && match.unitWarning) {
+          unitWarnings.push(match.unitWarning);
+        }
+
+        // Persist confirmed / high-confidence mapping to SQLite product_mappings
+        if (this.repo && (match.source === 'exact' || match.source === 'tokens' || match.score >= 0.85)) {
+          matcher.saveMapping(item.name, match.product);
+        }
+
         const sum = item.sum || item.qty * item.price;
-        matched.push({ productId: product.id, qty: item.qty, price: item.price, sum });
+        matched.push({ productId: match.product.id, qty: item.qty, price: item.price, sum });
       }
 
       if (!matched.length) {
         return {
           success: false,
           unmatched,
+          unitWarnings: unitWarnings.length ? unitWarnings : undefined,
           message: `Ни один товар не найден в номенклатуре iiko: ${unmatched.join(', ')}`
         };
       }
@@ -302,14 +330,21 @@ export class IikoClient {
         body: { ...header, documentNumber, items, invoice: null, fromExternalService: false }
       });
 
+      const messageParts: string[] = [];
+      if (unmatched.length) {
+        messageParts.push(`Не найдены в номенклатуре iiko и не добавлены: ${unmatched.join(', ')}`);
+      }
+      if (unitWarnings.length) {
+        messageParts.push(unitWarnings.join('\n'));
+      }
+
       return {
         success: true,
         documentId,
         documentNumber,
         unmatched: unmatched.length ? unmatched : undefined,
-        message: unmatched.length
-          ? `Не найдены в номенклатуре iiko и не добавлены: ${unmatched.join(', ')}`
-          : undefined
+        unitWarnings: unitWarnings.length ? unitWarnings : undefined,
+        message: messageParts.length ? messageParts.join('\n\n') : undefined
       };
     } catch (err: any) {
       return {

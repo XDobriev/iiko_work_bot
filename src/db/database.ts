@@ -92,6 +92,16 @@ export function getDatabase(customPath?: string): DatabaseSync {
       updated_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
 
+    -- Active editing sessions to survive server/process restarts
+    CREATE TABLE IF NOT EXISTS bot_edit_sessions (
+      user_id INTEGER PRIMARY KEY,
+      invoice_id INTEGER NOT NULL,
+      card_message_id INTEGER NOT NULL,
+      chat_id INTEGER NOT NULL,
+      edit_prompt_message_id INTEGER,
+      updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_items_norm_name ON invoice_items(normalized_name);
     CREATE INDEX IF NOT EXISTS idx_invoices_supplier ON invoices(supplier);
     CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date);

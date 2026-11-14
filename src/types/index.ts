@@ -68,6 +68,21 @@ export interface InvoiceItemRecord {
   created_at: string;
 }
 
+export interface InvoiceDomainRecord {
+  invoice: InvoiceRecord & { local_photo_path?: string; raw_json?: string };
+  items: InvoiceItemRecord[];
+  data: InvoiceData;
+}
+
+export interface ProductMappingRecord {
+  id: number;
+  raw_name: string;
+  normalized_name: string;
+  iiko_product_name: string;
+  iiko_product_id?: string | null;
+  updated_at: string;
+}
+
 export interface PriceComparisonItem {
   name: string;
   currentPrice: number;

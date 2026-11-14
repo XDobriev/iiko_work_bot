@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Редактор накладной — Бейни</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg-color: var(--tg-theme-bg-color, #f5f6f8);
+      --secondary-bg: var(--tg-theme-secondary-bg-color, #ffffff);
+      --text-color: var(--tg-theme-text-color, #1a1a1a);
+      --hint-color: var(--tg-theme-hint-color, #8e8e93);
+      --btn-color: var(--tg-theme-button-color, #2481cc);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --border-color: rgba(0, 0, 0, 0.08);
+      --card-radius: 14px;
+      --danger-color: #ff3b30;
+      --success-color: #34c759;
+      --warning-color: #ff9500;
+      --accent-kitchen: #007aff;
+      --accent-house: #ff9500;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --border-color: rgba(255, 255, 255, 0.12);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      padding: 12px 14px 100px 14px;
+      line-height: 1.4;
+    }
+
+    .container {
+      max-width: 580px;
+      margin: 0 auto;
+    }
+
+    /* Header & Badges */
+    .header-card {
+      background: var(--secondary-bg);
+      border-radius: var(--card-radius);
+      padding: 16px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .invoice-title {
+      font-size: 19px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .badge-status {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: rgba(0, 122, 255, 0.12);
+      color: var(--btn-color);
+    }
+
+    /* Form Fields */
+    .form-group {
+      margin-bottom: 10px;
+    }
+
+    .form-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--hint-color);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    input, select {
+      width: 100%;
+      background: var(--bg-color);
+      border: 1px solid var(--border-color);
+      color: var(--text-color);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--btn-color);
+    }
+
+    /* Warehouse Toggle (Segmented control) */
+    .warehouse-toggle {
+      display: flex;
+      background: var(--bg-color);
+      border-radius: 10px;
+      padding: 3px;
+      gap: 4px;
+      margin-top: 4px;
+      border: 1px solid var(--border-color);
+    }
+
+    .wh-option {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: var(--hint-color);
+      transition: all 0.2s ease;
+    }
+
+    .wh-option.active {
+      background: var(--secondary-bg);
+      color: var(--text-color);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    }
+
+    .wh-option.active.kitchen {
+      color: var(--accent-kitchen);
+    }
+
+    .wh-option.active.household {
+      color: var(--accent-house);
+    }
+
+    /* Items Section */
+    .section-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--hint-color);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 14px 4px 8px 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .item-card {
+      background: var(--secondary-bg);
+      border-radius: var(--card-radius);
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      border: 1px solid var(--border-color);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+      transition: transform 0.15s ease, opacity 0.15s ease;
+    }
+
+    .item-card.removing {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+
+    .item-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+
+    .item-num {
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--bg-color);
+      color: var(--hint-color);
+      padding: 2px 7px;
+      border-radius: 6px;
+    }
+
+    .item-name-input {
+      font-weight: 600;
+      font-size: 15px;
+      flex: 1;
+    }
+
+    .btn-del {
+      background: transparent;
+      border: none;
+      color: var(--danger-color);
+      font-size: 18px;
+      padding: 4px 8px;
+      cursor: pointer;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn-del:active {
+      background: rgba(255, 59, 48, 0.1);
+    }
+
+    .item-card-body {
+      display: grid;
+      grid-template-columns: 1.2fr 0.9fr 1.1fr 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stepper-container {
+      display: flex;
+      align-items: center;
+      background: var(--bg-color);
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+    }
+
+    .stepper-btn {
+      background: transparent;
+      border: none;
+      color: var(--btn-color);
+      font-size: 16px;
+      font-weight: 700;
+      width: 28px;
+      height: 34px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .stepper-btn:active {
+      background: rgba(0, 0, 0, 0.05);
+    }
+
+    .stepper-input {
+      border: none;
+      background: transparent;
+      text-align: center;
+      padding: 4px 2px;
+      font-size: 14px;
+      font-weight: 600;
+      width: 100%;
+    }
+
+    .unit-select {
+      padding: 6px 4px;
+      font-size: 13px;
+      font-weight: 500;
+      height: 36px;
+    }
+
+    .price-input-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .price-input {
+      padding-right: 22px;
+      font-size: 14px;
+      font-weight: 600;
+      height: 36px;
+      text-align: right;
+    }
+
+    .currency-sign {
+      position: absolute;
+      right: 8px;
+      font-size: 13px;
+      color: var(--hint-color);
+      pointer-events: none;
+    }
+
+    .line-sum-box {
+      text-align: right;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-color);
+      padding: 6px 4px;
+      white-space: nowrap;
+    }
+
+    /* Add Item Button */
+    .btn-add-item {
+      width: 100%;
+      background: var(--secondary-bg);
+      border: 2px dashed var(--border-color);
+      color: var(--btn-color);
+      padding: 12px;
+      border-radius: var(--card-radius);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-top: 10px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-add-item:active {
+      transform: scale(0.98);
+      background: rgba(0, 122, 255, 0.05);
+    }
+
+    /* Summary Bar */
+    .summary-card {
+      background: var(--secondary-bg);
+      border-radius: var(--card-radius);
+      padding: 16px;
+      margin-top: 14px;
+      border: 1px solid var(--border-color);
+    }
+
+    .summary-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .summary-total-label {
+      font-size: 17px;
+      font-weight: 700;
+    }
+
+    .summary-total-val {
+      font-size: 24px;
+      font-weight: 800;
+      color: var(--text-color);
+    }
+
+    .written-warning {
+      background: rgba(255, 149, 0, 0.12);
+      border: 1px solid rgba(255, 149, 0, 0.3);
+      color: #b36200;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .written-match {
+      background: rgba(52, 199, 89, 0.12);
+      border: 1px solid rgba(52, 199, 89, 0.3);
+      color: #1b8535;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+
+    /* Fixed Bottom Action */
+    .bottom-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: var(--secondary-bg);
+      padding: 12px 16px env(safe-area-inset-bottom, 12px);
+      box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.06);
+      display: flex;
+      gap: 10px;
+      z-index: 100;
+      border-top: 1px solid var(--border-color);
+    }
+
+    .btn-save-main {
+      flex: 1;
+      background: var(--btn-color);
+      color: var(--btn-text);
+      border: none;
+      padding: 14px 18px;
+      font-size: 16px;
+      font-weight: 700;
+      border-radius: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+
+    .btn-save-main:active {
+      transform: scale(0.98);
+      opacity: 0.9;
+    }
+
+    /* Notification toast */
+    .toast {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-100px);
+      background: #1c1c1e;
+      color: #ffffff;
+      padding: 12px 20px;
+      border-radius: 24px;
+      font-size: 14px;
+      font-weight: 600;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 999;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Autocomplete list */
+    datalist {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header Card -->
+    <div class="header-card">
+      <div class="header-top">
+        <div class="invoice-title">
+          <span>📋 Накладная</span>
+          <span id="invoice-id-display">#...</span>
+        </div>
+        <div id="status-badge" class="badge-status">Черновик</div>
+      </div>
+
+      <div class="input-row">
+        <div class="form-group" style="flex: 1.4;">
+          <label class="form-label">Поставщик</label>
+          <input type="text" id="supplier-input" list="suppliers-list" placeholder="Название поставщика" autocomplete="off">
+          <datalist id="suppliers-list"></datalist>
+        </div>
+        <div class="form-group" style="flex: 1;">
+          <label class="form-label">Дата</label>
+          <input type="text" id="date-input" placeholder="ДД.ММ.ГГГГ">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Склад поступления</label>
+        <div class="warehouse-toggle">
+          <button type="button" class="wh-option kitchen active" id="wh-kitchen" onclick="setWarehouse('kitchen')">
+            🍽 Склад Кухня
+          </button>
+          <button type="button" class="wh-option household" id="wh-household" onclick="setWarehouse('household')">
+            🏠 Хоз склад
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Items List -->
+    <div class="section-title">
+      <span>Позиции (<span id="items-count">0</span>)</span>
+      <span style="font-size: 12px; font-weight: normal; color: var(--hint-color)">Кол-во | Ед | Цена</span>
+    </div>
+
+    <div id="items-list">
+      <!-- Item cards rendered dynamically -->
+    </div>
+
+    <button type="button" class="btn-add-item" onclick="addItem()">
+      <span>➕</span> Добавить позицию
+    </button>
+
+    <!-- Summary Card -->
+    <div class="summary-card">
+      <div class="summary-row">
+        <span class="summary-total-label">Итоговая сумма:</span>
+        <span class="summary-total-val" id="total-val">0 ₽</span>
+      </div>
+      <div id="written-check-container"></div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+      <span id="toast-icon">✅</span>
+      <span id="toast-text">Сохранено</span>
+    </div>
+
+    <!-- Floating bottom bar (visible if not inside Telegram webapp native button) -->
+    <div class="bottom-bar" id="fallback-bottom-bar">
+      <button type="button" class="btn-save-main" onclick="saveInvoice()">
+        💾 Сохранить изменения
+      </button>
+    </div>
+  </div>
+
+  <datalist id="products-list"></datalist>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      try {
+        if (tg.themeParams?.bg_color) {
+          document.documentElement.style.setProperty('--bg-color', tg.themeParams.bg_color);
+        }
+      } catch (e) {}
+    }
+
+    // State
+    const urlParams = new URLSearchParams(window.location.search);
+    let invoiceId = parseInt(urlParams.get('invoiceId') || '1', 10);
+    let invoiceData = {
+      date: new Date().toLocaleDateString('ru-RU'),
+      supplier: 'Не указан',
+      warehouse: 'kitchen',
+      items: [],
+      total_written: null
+    };
+
+    let knownSuppliers = [];
+    let knownProducts = [];
+
+    // Helper: Haptic feedback
+    function haptic(type = 'light') {
+      try {
+        if (tg?.HapticFeedback) {
+          if (type === 'success' || type === 'error' || type === 'warning') {
+            tg.HapticFeedback.notificationOccurred(type);
+          } else {
+            tg.HapticFeedback.impactOccurred(type);
+          }
+        }
+      } catch (e) {}
+    }
+
+    // Helper: Show toast
+    function showToast(text, icon = '✅') {
+      const toast = document.getElementById('toast');
+      document.getElementById('toast-icon').innerText = icon;
+      document.getElementById('toast-text').innerText = text;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2500);
+    }
+
+    // Set warehouse
+    function setWarehouse(wh) {
+      haptic('selection');
+      invoiceData.warehouse = wh;
+      document.getElementById('wh-kitchen').classList.toggle('active', wh === 'kitchen');
+      document.getElementById('wh-household').classList.toggle('active', wh === 'household');
+    }
+
+    // Render items list
+    function renderItems() {
+      const container = document.getElementById('items-list');
+      container.innerHTML = '';
+      document.getElementById('items-count').innerText = invoiceData.items.length;
+
+      invoiceData.items.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = 'item-card';
+        card.id = `item-card-${index}`;
+
+        const qtyVal = Number(item.qty) || 0;
+        const priceVal = Number(item.price) || 0;
+        const sumVal = Math.round(item.sum || qtyVal * priceVal);
+
+        const units = ['кг', 'шт', 'л', 'г', 'уп', 'бан', 'бут', 'порц'];
+        const unitOptions = units.map(u => 
+          `<option value="${u}" ${item.unit === u ? 'selected' : ''}>${u}</option>`
+        ).join('');
+
+        card.innerHTML = `
+          <div class="item-card-header">
+            <span class="item-num">#${index + 1}</span>
+            <input type="text" class="item-name-input" list="products-list" value="${escapeHtml(item.name || '')}" 
+              placeholder="Наименование товара" onchange="updateItemName(${index}, this.value)">
+            <button type="button" class="btn-del" onclick="deleteItem(${index})" title="Удалить">🗑</button>
+          </div>
+          <div class="item-card-body">
+            <div class="stepper-container">
+              <button type="button" class="stepper-btn" onclick="stepQty(${index}, -1)">−</button>
+              <input type="number" step="any" min="0" class="stepper-input" value="${qtyVal}" 
+                oninput="updateItemQty(${index}, this.value)">
+              <button type="button" class="stepper-btn" onclick="stepQty(${index}, 1)">+</button>
+            </div>
+            <select class="unit-select" onchange="updateItemUnit(${index}, this.value)">
+              ${unitOptions}
+            </select>
+            <div class="price-input-wrapper">
+              <input type="number" step="any" min="0" class="price-input" value="${priceVal}" 
+                placeholder="Цена" oninput="updateItemPrice(${index}, this.value)">
+              <span class="currency-sign">₽</span>
+            </div>
+            <div class="line-sum-box" id="item-sum-${index}">
+              = ${sumVal} ₽
+            </div>
+          </div>
+        `;
+
+        container.appendChild(card);
+      });
+
+      calculateTotals();
+    }
+
+    function escapeHtml(str) {
+      return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function updateItemName(index, val) {
+      invoiceData.items[index].name = val.trim();
+    }
+
+    function updateItemQty(index, val) {
+      const num = parseFloat(val) || 0;
+      invoiceData.items[index].qty = num;
+      updateLineSum(index);
+    }
+
+    function stepQty(index, delta) {
+      haptic('light');
+      let current = parseFloat(invoiceData.items[index].qty) || 0;
+      current = Math.max(0, current + delta);
+      // round to 2 decimals
+      current = Math.round(current * 100) / 100;
+      invoiceData.items[index].qty = current;
+      renderItems();
+    }
+
+    function updateItemUnit(index, val) {
+      invoiceData.items[index].unit = val;
+    }
+
+    function updateItemPrice(index, val) {
+      const num = parseFloat(val) || 0;
+      invoiceData.items[index].price = num;
+      updateLineSum(index);
+    }
+
+    function updateLineSum(index) {
+      const item = invoiceData.items[index];
+      const sum = Math.round((Number(item.qty) || 0) * (Number(item.price) || 0));
+      item.sum = sum;
+      const sumEl = document.getElementById(`item-sum-${index}`);
+      if (sumEl) {
+        sumEl.innerText = `= ${sum} ₽`;
+      }
+      calculateTotals();
+    }
+
+    function deleteItem(index) {
+      haptic('warning');
+      const card = document.getElementById(`item-card-${index}`);
+      if (card) {
+        card.classList.add('removing');
+        setTimeout(() => {
+          invoiceData.items.splice(index, 1);
+          renderItems();
+        }, 160);
+      } else {
+        invoiceData.items.splice(index, 1);
+        renderItems();
+      }
+    }
+
+    function addItem() {
+      haptic('light');
+      invoiceData.items.push({
+        name: '',
+        qty: 1,
+        price: 0,
+        sum: 0,
+        unit: 'кг'
+      });
+      renderItems();
+      // focus new input
+      setTimeout(() => {
+        const inputs = document.querySelectorAll('.item-name-input');
+        if (inputs.length > 0) {
+          inputs[inputs.length - 1].focus();
+        }
+      }, 50);
+    }
+
+    function calculateTotals() {
+      let total = 0;
+      invoiceData.items.forEach(it => {
+        const s = it.sum || (Number(it.qty) || 0) * (Number(it.price) || 0);
+        total += s;
+      });
+
+      const totalVal = Math.round(total);
+      document.getElementById('total-val').innerText = `${totalVal.toLocaleString('ru-RU')} ₽`;
+
+      // Update Telegram MainButton
+      if (tg?.MainButton) {
+        tg.MainButton.setText(`💾 СОХРАНИТЬ В БОТ (${totalVal.toLocaleString('ru-RU')} ₽)`);
+        tg.MainButton.show();
+      }
+
+      // Check handwritten total
+      const checkEl = document.getElementById('written-check-container');
+      if (invoiceData.total_written != null && invoiceData.total_written > 0) {
+        const diff = Math.abs(totalVal - Math.round(invoiceData.total_written));
+        if (diff > 5) {
+          checkEl.innerHTML = `
+            <div class="written-warning">
+              ⚠️ На чеке от руки написано: <b>${Math.round(invoiceData.total_written)} ₽</b> (расхождение: ${diff} ₽)
+            </div>
+          `;
+        } else {
+          checkEl.innerHTML = `
+            <div class="written-match">
+              ✅ Сумма совпадает с рукописной суммой чека (${Math.round(invoiceData.total_written)} ₽).
+            </div>
+          `;
+        }
+      } else {
+        checkEl.innerHTML = '';
+      }
+    }
+
+    // Save Action
+    async function saveInvoice() {
+      haptic('success');
+      invoiceData.supplier = document.getElementById('supplier-input').value.trim() || 'Не указан';
+      invoiceData.date = document.getElementById('date-input').value.trim() || invoiceData.date;
+
+      const payload = {
+        invoiceId: invoiceId,
+        action: 'edit_invoice',
+        data: invoiceData
+      };
+
+      // 1. If inside Telegram WebApp, send data back to bot
+      if (tg && typeof tg.sendData === 'function') {
+        try {
+          tg.sendData(JSON.stringify(payload));
+          showToast('Отправлено в бот!', '✅');
+          return;
+        } catch (e) {
+          console.warn('Telegram.WebApp.sendData failed:', e);
+        }
+      }
+
+      // 2. Direct HTTP API fallback
+      try {
+        const res = await fetch(`/api/invoice/${invoiceId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+          showToast('Сохранено в базу!', '✅');
+          setTimeout(() => {
+            if (tg && typeof tg.close === 'function') {
+              tg.close();
+            }
+          }, 1200);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.message || 'Ошибка сохранения', '⚠️');
+        }
+      } catch (err) {
+        console.error('Fetch error:', err);
+        showToast('Ошибка сети', '❌');
+      }
+    }
+
+    // Bind Telegram MainButton
+    if (tg?.MainButton) {
+      tg.MainButton.onClick(saveInvoice);
+      // If inside Telegram, hide duplicate fallback button
+      const fallbackBar = document.getElementById('fallback-bottom-bar');
+      if (fallbackBar) fallbackBar.style.display = 'none';
+    }
+
+    // Initial load
+    async function init() {
+      document.getElementById('invoice-id-display').innerText = `#${invoiceId}`;
+
+      // Fetch invoice from API
+      try {
+        const res = await fetch(`/api/invoice/${invoiceId}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data) {
+            invoiceData = json.data;
+          }
+          if (Array.isArray(json.suppliers)) {
+            knownSuppliers = json.suppliers;
+            const suppList = document.getElementById('suppliers-list');
+            suppList.innerHTML = knownSuppliers.map(s => `<option value="${escapeHtml(s)}">`).join('');
+          }
+          if (Array.isArray(json.knownItems)) {
+            knownProducts = json.knownItems;
+            const prodList = document.getElementById('products-list');
+            prodList.innerHTML = knownProducts.map(p => `<option value="${escapeHtml(p)}">`).join('');
+          }
+        }
+      } catch (e) {
+        console.warn('Не удалось загрузить данные через API:', e);
+      }
+
+      document.getElementById('supplier-input').value = invoiceData.supplier || '';
+      document.getElementById('date-input').value = invoiceData.date || '';
+      setWarehouse(invoiceData.warehouse || 'kitchen');
+      renderItems();
+    }
+
+    init();
+  </script>
+</body>
+</html>

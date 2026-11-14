@@ -1,0 +1,41 @@
+# Render Blueprint Specification
+# Режим развертывания Telegram-бота ресторана «Бейни» на платформе Render.
+# ВАЖНО: Telegram-бот работает в режиме long polling (bot.start()),
+# поэтому деплоится как Background Worker (type: worker), а НЕ Web Service
+# (у него нет входящего HTTP-порта).
+#
+# Для базы данных SQLite и архива фото рекомендуется Persistent Disk.
+
+services:
+  - type: worker
+    name: beyni-iiko-bot
+    runtime: node
+    plan: starter # Render Disks доступны на планах Starter и выше
+    region: frankfurt # Ближайший европейский регион для минимальной задержки к iikoWeb
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    disk:
+      name: invoices-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /var/data/invoices.db
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_MODELS
+        value: gemini-2.5-flash,gemini-2.5-flash-lite,gemini-1.5-flash
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: IIKO_URL
+        value: https://beyni.iikoweb.ru
+      - key: IIKO_LOGIN
+        sync: false
+      - key: IIKO_PASSWORD
+        sync: false

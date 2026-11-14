@@ -32,3 +32,5 @@ Thumbs.db
 # Temporary / Scratch
 temp/
 tmp/
+.playwright-mcp/
+

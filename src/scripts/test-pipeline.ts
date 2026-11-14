@@ -78,13 +78,13 @@ async function runTestPipeline() {
     console.log(`   Результат создания накладной:`, iikoResult);
   }
 
-  console.log('\n6️⃣ ТЕСТ РЕАЛЬНОГО ВЫЗОВА GEMINI 3.8 FLASH VISION:');
+  console.log('\n6️⃣ ТЕСТ РЕАЛЬНОГО ВЫЗОВА GEMINI VISION API:');
   try {
     const recognizer = new GeminiInvoiceRecognizer();
     // 1x1 test image
     const tinyJpegB64 = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
     const buf = Buffer.from(tinyJpegB64, 'base64');
-    console.log('   📡 Отправка тестового запроса в Gemini 3.8 Flash...');
+    console.log(`   📡 Отправка тестового запроса в Gemini (${recognizer.getCandidateModels().join(', ')})...`);
     const recResult = await recognizer.recognize(buf, { knownItems });
     console.log('   ✅ Gemini успешно распознал структуру и вернул валидный JSON:');
     console.log(JSON.stringify(recResult, null, 2));
