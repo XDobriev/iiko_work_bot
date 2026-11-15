@@ -10,8 +10,10 @@ import {
   InvoiceStatus,
   HistoricalComparison,
   PriceComparisonItem,
-  WarehouseType
+  WarehouseType,
+  ModelUsageStat
 } from '../types/index.js';
+import { classifyItemWarehouse } from '../workflow/warehouse-classifier.js';
 
 export function normalizeName(name: string): string {
   return name
@@ -30,6 +32,7 @@ export interface SaveInvoiceMeta {
   photoFileId?: string;
   localPhotoPath?: string;
   restaurantId?: string;
+  modelUsed?: string;
 }
 
 export interface DailyStats {
@@ -65,9 +68,11 @@ export class InvoicesRepository {
     const insertInvoice = this.db.prepare(`
       INSERT INTO invoices (
         restaurant_id, date, supplier, warehouse, total_calculated, total_written,
-        status, telegram_user_id, telegram_chat_id, telegram_message_id, card_message_id, photo_file_id, local_photo_path, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+        status, telegram_user_id, telegram_chat_id, telegram_message_id, card_message_id, photo_file_id, local_photo_path, raw_json, model_used
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+
+    const modelUsed = meta?.modelUsed || data.model_used || null;
 
     const result = insertInvoice.run(
       meta?.restaurantId || 'beyni',
@@ -82,19 +87,21 @@ export class InvoicesRepository {
       meta?.cardMessageId ?? null,
       meta?.photoFileId ?? null,
       meta?.localPhotoPath ?? null,
-      JSON.stringify(data)
+      JSON.stringify(data),
+      modelUsed
     );
 
     const invoiceId = Number(result.lastInsertRowid);
 
     const insertItem = this.db.prepare(`
       INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const item of data.items) {
       const sum = item.sum || item.qty * item.price;
+      const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
       insertItem.run(
         invoiceId,
         item.name,
@@ -102,7 +109,8 @@ export class InvoicesRepository {
         item.qty,
         item.price,
         sum,
-        item.unit || 'шт'
+        item.unit || 'шт',
+        wh
       );
     }
 
@@ -129,9 +137,11 @@ export class InvoicesRepository {
         qty: it.qty,
         price: it.price,
         sum: it.sum,
-        unit: it.unit || undefined
+        unit: it.unit || undefined,
+        warehouse: (it.warehouse as WarehouseType) || classifyItemWarehouse(it.name, undefined, invoice.warehouse || 'kitchen')
       })),
-      total_written: invoice.total_written ?? null
+      total_written: invoice.total_written ?? null,
+      model_used: invoice.model_used || undefined
     };
 
     return {
@@ -146,7 +156,7 @@ export class InvoicesRepository {
     return domain ? domain.data : null;
   }
 
-  getInvoiceById(id: number): { invoice: InvoiceRecord & { local_photo_path?: string }; items: InvoiceItemRecord[] } | null {
+  getInvoiceById(id: number): { invoice: InvoiceRecord; items: InvoiceItemRecord[] } | null {
     const domain = this.getInvoice(id);
     if (!domain) return null;
     return { invoice: domain.invoice, items: domain.items };
@@ -161,7 +171,8 @@ export class InvoicesRepository {
 
     const updateStmt = this.db.prepare(`
       UPDATE invoices
-      SET supplier = ?, date = ?, warehouse = ?, total_calculated = ?, total_written = ?, raw_json = ?
+      SET supplier = ?, date = ?, warehouse = ?, total_calculated = ?, total_written = ?, raw_json = ?,
+          model_used = COALESCE(?, model_used)
       WHERE id = ?
     `);
     const res = updateStmt.run(
@@ -171,6 +182,7 @@ export class InvoicesRepository {
       totalCalculated,
       data.total_written ?? null,
       JSON.stringify(data),
+      data.model_used ?? null,
       id
     );
 
@@ -181,12 +193,13 @@ export class InvoicesRepository {
 
     const insertItem = this.db.prepare(`
       INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const item of data.items) {
       const sum = item.sum || item.qty * item.price;
+      const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
       insertItem.run(
         id,
         item.name,
@@ -194,11 +207,49 @@ export class InvoicesRepository {
         item.qty,
         item.price,
         sum,
-        item.unit || 'шт'
+        item.unit || 'шт',
+        wh
       );
     }
 
     return true;
+  }
+
+  pushSnapshot(invoiceId: number, data: InvoiceData): void {
+    this.db.prepare('INSERT INTO invoice_snapshots (invoice_id, snapshot_data) VALUES (?, ?)').run(
+      invoiceId,
+      JSON.stringify(data)
+    );
+    // Prune to keep last 10 snapshots per invoice
+    this.db.prepare(`
+      DELETE FROM invoice_snapshots
+      WHERE invoice_id = ? AND id NOT IN (
+        SELECT id FROM invoice_snapshots WHERE invoice_id = ? ORDER BY id DESC LIMIT 10
+      )
+    `).run(invoiceId, invoiceId);
+  }
+
+  popSnapshot(invoiceId: number): InvoiceData | null {
+    const row = this.db.prepare(`
+      SELECT id, snapshot_data FROM invoice_snapshots
+      WHERE invoice_id = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(invoiceId) as { id: number; snapshot_data: string } | undefined;
+
+    if (!row) return null;
+
+    this.db.prepare('DELETE FROM invoice_snapshots WHERE id = ?').run(row.id);
+
+    try {
+      return JSON.parse(row.snapshot_data) as InvoiceData;
+    } catch {
+      return null;
+    }
+  }
+
+  hasSnapshot(invoiceId: number): boolean {
+    const row = this.db.prepare('SELECT 1 FROM invoice_snapshots WHERE invoice_id = ? LIMIT 1').get(invoiceId);
+    return Boolean(row);
   }
 
   updateInvoiceStatus(id: number, status: InvoiceStatus, iikoDocumentId?: string): boolean {
@@ -209,6 +260,25 @@ export class InvoicesRepository {
     `);
     const res = stmt.run(status, iikoDocumentId ?? null, id);
     return res.changes > 0;
+  }
+
+  updateInvoiceModel(invoiceId: number, modelUsed: string): boolean {
+    const res = this.db.prepare('UPDATE invoices SET model_used = ? WHERE id = ?').run(modelUsed, invoiceId);
+    return res.changes > 0;
+  }
+
+  getModelStats(): ModelUsageStat[] {
+    const stmt = this.db.prepare(`
+      SELECT
+        model_used as model,
+        COUNT(*) as count,
+        MAX(created_at) as lastUsed
+      FROM invoices
+      WHERE model_used IS NOT NULL AND TRIM(model_used) != ''
+      GROUP BY model_used
+      ORDER BY count DESC
+    `);
+    return stmt.all() as unknown as ModelUsageStat[];
   }
 
   updateInvoiceTelegramMessage(id: number, chatId: number, cardMessageId: number): boolean {
@@ -255,6 +325,26 @@ export class InvoicesRepository {
     const newWarehouse: WarehouseType = inv.invoice.warehouse === 'household' ? 'kitchen' : 'household';
     const stmt = this.db.prepare('UPDATE invoices SET warehouse = ? WHERE id = ?');
     stmt.run(newWarehouse, id);
+
+    // Also update all items in this invoice to the new warehouse
+    this.db.prepare('UPDATE invoice_items SET warehouse = ? WHERE invoice_id = ?').run(newWarehouse, id);
+
+    // Update raw_json in invoices if present
+    if (inv.invoice.raw_json) {
+      try {
+        const parsed = JSON.parse(inv.invoice.raw_json);
+        parsed.warehouse = newWarehouse;
+        if (Array.isArray(parsed.items)) {
+          parsed.items.forEach((it: any) => {
+            it.warehouse = newWarehouse;
+          });
+        }
+        this.db.prepare('UPDATE invoices SET raw_json = ? WHERE id = ?').run(JSON.stringify(parsed), id);
+      } catch {
+        // ignore malformed raw_json
+      }
+    }
+
     return newWarehouse;
   }
 

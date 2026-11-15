@@ -253,6 +253,34 @@
       background: rgba(255, 59, 48, 0.1);
     }
 
+    .item-wh-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      white-space: nowrap;
+      transition: all 0.15s ease;
+      background: var(--bg-color);
+      color: var(--text-color);
+    }
+
+    .item-wh-badge.kitchen {
+      background: rgba(0, 122, 255, 0.12);
+      color: var(--accent-kitchen);
+      border-color: rgba(0, 122, 255, 0.25);
+    }
+
+    .item-wh-badge.household {
+      background: rgba(255, 149, 0, 0.15);
+      color: var(--accent-house);
+      border-color: rgba(255, 149, 0, 0.35);
+    }
+
     /* iiko Nomenclature Matcher Bar */
     .iiko-matcher-box {
       background: var(--chip-bg);
@@ -619,6 +647,7 @@
         <span class="summary-total-label">Итоговая сумма:</span>
         <span class="summary-total-val" id="total-val">0 ₽</span>
       </div>
+      <div id="warehouse-breakdown" class="summary-breakdown" style="font-size: 13px; color: var(--hint-color); margin-top: 6px; display: none;"></div>
       <div id="written-check-container"></div>
     </div>
 
@@ -733,6 +762,10 @@
         if (priceInput) invoiceData.items[index].price = parseFloat(priceInput.value) || 0;
         invoiceData.items[index].sum = Math.round((invoiceData.items[index].qty || 0) * (invoiceData.items[index].price || 0));
 
+        if (!invoiceData.items[index].warehouse) {
+          invoiceData.items[index].warehouse = isHouseholdName(invoiceData.items[index].name) ? 'household' : (invoiceData.warehouse || 'kitchen');
+        }
+
         if (mappingInput) {
           invoiceData.items[index].iikoMapping = mappingInput.value.trim();
         }
@@ -740,6 +773,23 @@
           invoiceData.items[index].saveMapping = mappingCheckbox.checked;
         }
       });
+    }
+
+    function isHouseholdName(name) {
+      if (!name) return false;
+      const n = name.toLowerCase().replace(/ё/g, 'е');
+      const roots = ['перчатк', 'салфетк', 'моюще', 'моющ', 'губк', 'пакет', 'тряпк', 'уголь', 'дез', 'фольг', 'контейнер', 'мыл', 'белизн', 'пленк', 'плёнк', 'химия', 'бахил', 'чистящ', 'туалетн', 'зубочистк', 'трубочк', 'стакан', 'мусорн'];
+      return roots.some(r => n.includes(r));
+    }
+
+    function toggleItemWarehouse(index) {
+      haptic('selection');
+      syncItemsFromDom();
+      if (!invoiceData.items[index]) return;
+      const current = invoiceData.items[index].warehouse || (isHouseholdName(invoiceData.items[index].name) ? 'household' : 'kitchen');
+      invoiceData.items[index].warehouse = current === 'household' ? 'kitchen' : 'household';
+      markDirty();
+      renderItems();
     }
 
     // Set warehouse
@@ -845,11 +895,18 @@
           ? `🟢 iiko: <b>${escapeHtml(item.iikoMapping)}</b>`
           : `🟡 iiko: Не сопоставлен`;
 
+        const itemWh = item.warehouse || (isHouseholdName(item.name) ? 'household' : (invoiceData.warehouse || 'kitchen'));
+        item.warehouse = itemWh;
+
         card.innerHTML = `
           <div class="item-card-header">
             <span class="item-num">#${index + 1}</span>
             <input type="text" class="item-name-input" list="products-list" value="${escapeHtml(item.name || '')}" 
               placeholder="Наименование товара" oninput="onItemNameInput(${index}, this.value)">
+            <button type="button" class="item-wh-badge ${itemWh === 'household' ? 'household' : 'kitchen'}"
+              id="item-wh-btn-${index}" onclick="toggleItemWarehouse(${index})" title="Склад позиции">
+              ${itemWh === 'household' ? '🏠 Хоз' : '🍽 Кухня'}
+            </button>
             <button type="button" class="btn-del" onclick="deleteItem(${index})" title="Удалить">🗑</button>
           </div>
 
@@ -974,12 +1031,14 @@
       haptic('light');
       markDirty();
       syncItemsFromDom();
+      const defaultWh = invoiceData.warehouse || 'kitchen';
       invoiceData.items.push({
         name: '',
         qty: 1,
         price: 0,
         sum: 0,
         unit: 'кг',
+        warehouse: defaultWh,
         saveMapping: true
       });
       renderItems();
@@ -994,13 +1053,31 @@
 
     function calculateTotals() {
       let total = 0;
+      let kitchenTotal = 0;
+      let houseTotal = 0;
+
       invoiceData.items.forEach(it => {
         const s = it.sum || (Number(it.qty) || 0) * (Number(it.price) || 0);
         total += s;
+        if (it.warehouse === 'household') {
+          houseTotal += s;
+        } else {
+          kitchenTotal += s;
+        }
       });
 
       const totalVal = Math.round(total);
       document.getElementById('total-val').innerText = `${totalVal.toLocaleString('ru-RU')} ₽`;
+
+      const breakdownEl = document.getElementById('warehouse-breakdown');
+      if (breakdownEl) {
+        if (kitchenTotal > 0 && houseTotal > 0) {
+          breakdownEl.style.display = 'block';
+          breakdownEl.innerHTML = `🍽 Кухня: <b>${Math.round(kitchenTotal).toLocaleString('ru-RU')} ₽</b> &nbsp;|&nbsp; 🏠 Хоз: <b>${Math.round(houseTotal).toLocaleString('ru-RU')} ₽</b>`;
+        } else {
+          breakdownEl.style.display = 'none';
+        }
+      }
 
       // Update Telegram MainButton
       if (tg?.MainButton) {
@@ -1103,8 +1180,8 @@
       }
     }
 
-    // Bind Telegram MainButton
-    if (tg?.MainButton) {
+    // Bind Telegram MainButton if running inside Telegram client
+    if (tg?.MainButton && tg.initData) {
       tg.MainButton.onClick(saveInvoice);
       const fallbackBar = document.getElementById('fallback-bottom-bar');
       if (fallbackBar) fallbackBar.style.display = 'none';

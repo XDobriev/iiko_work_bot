@@ -8,6 +8,9 @@ export interface Config {
     apiKey: string;
     model: string;
     models: string[];
+    photoModels: string[];
+    voiceModels: string[];
+    complexModels: string[];
   };
   telegram: {
     token: string;
@@ -36,7 +39,7 @@ const parseAllowedUserIds = (raw?: string): number[] => {
     .filter(id => !isNaN(id));
 };
 
-const parseModelList = (rawModels?: string, primary?: string): string[] => {
+const parseModelList = (rawModels?: string, primary?: string, fallbackList?: string[]): string[] => {
   const result: string[] = [];
   if (primary && primary.trim()) {
     result.push(primary.trim());
@@ -50,7 +53,7 @@ const parseModelList = (rawModels?: string, primary?: string): string[] => {
       }
     }
   } else {
-    const fallback = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'];
+    const fallback = fallbackList || ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3-flash-preview'];
     for (const m of fallback) {
       if (!result.includes(m)) {
         result.push(m);
@@ -63,11 +66,16 @@ const parseModelList = (rawModels?: string, primary?: string): string[] => {
 
 const primaryModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 
+const generalModels = parseModelList(process.env.GEMINI_MODELS, primaryModel);
+
 export const config: Config = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: primaryModel,
-    models: parseModelList(process.env.GEMINI_MODELS, primaryModel)
+    models: generalModels,
+    photoModels: parseModelList(process.env.GEMINI_MODELS_PHOTO, undefined, [primaryModel, ...generalModels]),
+    voiceModels: parseModelList(process.env.GEMINI_MODELS_VOICE, undefined, ['gemini-3.5-transcribe', 'gemini-3.5-flash-lite', 'gemini-3.5-flash']),
+    complexModels: parseModelList(process.env.GEMINI_MODELS_COMPLEX, undefined, ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite'])
   },
   telegram: {
     token: process.env.TELEGRAM_TOKEN || '',

@@ -1,5 +1,6 @@
-import { InvoiceData, HistoricalComparison } from '../types/index.js';
+import { InvoiceData, InvoiceItem, HistoricalComparison } from '../types/index.js';
 import { DailyStats } from '../db/invoices.repo.js';
+import { classifyItemWarehouse } from '../workflow/warehouse-classifier.js';
 
 export function escapeHtml(str: string): string {
   return str
@@ -13,14 +14,30 @@ export function formatInvoiceMessage(
   data: InvoiceData,
   comparison: HistoricalComparison
 ): string {
-  const isHousehold = data.warehouse === 'household';
-  const whIcon = isHousehold ? '🏠' : '🍽';
-  const whName = isHousehold ? 'Хоз склад' : 'Склад Кухня';
+  const kitchenItems: Array<{ item: InvoiceItem; index: number }> = [];
+  const householdItems: Array<{ item: InvoiceItem; index: number }> = [];
+
+  for (let i = 0; i < data.items.length; i++) {
+    const item = data.items[i];
+    const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
+    if (wh === 'household') {
+      householdItems.push({ item, index: i });
+    } else {
+      kitchenItems.push({ item, index: i });
+    }
+  }
+
+  const isMixed = kitchenItems.length > 0 && householdItems.length > 0;
+  const isHousehold = !isMixed && (data.warehouse === 'household' || householdItems.length > 0);
+  const whIcon = isMixed ? '🍽+🏠' : (isHousehold ? '🏠' : '🍽');
+  const whName = isMixed
+    ? '🍽 <b>Кухня</b> + 🏠 <b>Хоз склад</b> <i>(смешанная)</i>'
+    : `<b>${escapeHtml(isHousehold ? 'Хоз склад' : 'Склад Кухня')}</b>`;
 
   const lines: string[] = [
     `📋 <b>Накладная #${invoiceId}</b>`,
     `📅 <b>Дата:</b> <code>${escapeHtml(data.date || 'Не указана')}</code>  |  🚛 <b>Поставщик:</b> <code>${escapeHtml(data.supplier || 'Не указан')}</code>`,
-    `🏭 <b>Склад:</b> ${whIcon} <b>${escapeHtml(whName)}</b>`,
+    `🏭 <b>Склад:</b> ${whName}`,
     ''
   ];
 
@@ -31,33 +48,94 @@ export function formatInvoiceMessage(
     );
   }
 
-  // Preformatted Monospace Table
-  const tableLines: string[] = [];
-  tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
-  tableLines.push('──────────────────────────────────────────────');
-
   let calcTotal = 0;
-  for (let i = 0; i < data.items.length; i++) {
-    const item = data.items[i];
-    const itemSum = item.sum || item.qty * item.price;
-    calcTotal += itemSum;
+  const tableLines: string[] = [];
 
-    const num = (i + 1).toString().padEnd(2, ' ');
-    let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
-    name = name.padEnd(17, ' ');
+  if (isMixed) {
+    // 1. Kitchen Block
+    let kitchenSum = 0;
+    tableLines.push('🍽 Склад Кухня (продукты):');
+    tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
+    tableLines.push('──────────────────────────────────────────────');
 
-    const unit = item.unit || 'шт';
-    const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
-    const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
+    for (const { item, index } of kitchenItems) {
+      const itemSum = item.sum || item.qty * item.price;
+      kitchenSum += itemSum;
 
-    const price = Math.round(item.price).toString().padStart(6, ' ');
-    const sum = Math.round(itemSum).toString().padStart(7, ' ');
+      const num = (index + 1).toString().padEnd(2, ' ');
+      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
+      name = name.padEnd(17, ' ');
 
-    tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+      const unit = item.unit || 'шт';
+      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
+      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
+
+      const price = Math.round(item.price).toString().padStart(6, ' ');
+      const sum = Math.round(itemSum).toString().padStart(7, ' ');
+
+      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+    }
+
+    tableLines.push('──────────────────────────────────────────────');
+    tableLines.push(`   Подытог Кухня:               ${Math.round(kitchenSum).toString().padStart(8, ' ')}`);
+    tableLines.push('');
+
+    // 2. Household Block
+    let houseSum = 0;
+    tableLines.push('🏠 Хоз склад (хозтовары):');
+    tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
+    tableLines.push('──────────────────────────────────────────────');
+
+    for (const { item, index } of householdItems) {
+      const itemSum = item.sum || item.qty * item.price;
+      houseSum += itemSum;
+
+      const num = (index + 1).toString().padEnd(2, ' ');
+      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
+      name = name.padEnd(17, ' ');
+
+      const unit = item.unit || 'шт';
+      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
+      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
+
+      const price = Math.round(item.price).toString().padStart(6, ' ');
+      const sum = Math.round(itemSum).toString().padStart(7, ' ');
+
+      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+    }
+
+    calcTotal = kitchenSum + houseSum;
+    tableLines.push('──────────────────────────────────────────────');
+    tableLines.push(`   Подытог Хоз склад:           ${Math.round(houseSum).toString().padStart(8, ' ')}`);
+    tableLines.push('══════════════════════════════════════════════');
+    tableLines.push(`   ОБЩИЙ ИТОГ:                  ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
+  } else {
+    // Single Monospace Table
+    tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
+    tableLines.push('──────────────────────────────────────────────');
+
+    for (let i = 0; i < data.items.length; i++) {
+      const item = data.items[i];
+      const itemSum = item.sum || item.qty * item.price;
+      calcTotal += itemSum;
+
+      const num = (i + 1).toString().padEnd(2, ' ');
+      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
+      name = name.padEnd(17, ' ');
+
+      const unit = item.unit || 'шт';
+      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
+      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
+
+      const price = Math.round(item.price).toString().padStart(6, ' ');
+      const sum = Math.round(itemSum).toString().padStart(7, ' ');
+
+      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+    }
+
+    tableLines.push('──────────────────────────────────────────────');
+    tableLines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
   }
-
-  tableLines.push('──────────────────────────────────────────────');
-  tableLines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
 
   lines.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
 
@@ -103,6 +181,13 @@ export function formatInvoiceMessage(
     } else {
       lines.push('\n' + priceLines.join('\n'));
     }
+  }
+
+  // Model indicator
+  if (data.model_used) {
+    const isEscalated = data.model_used.includes('эскалация');
+    const badge = isEscalated ? '⚡️' : '🤖';
+    lines.push(`\n${badge} <i>Модель: ${escapeHtml(data.model_used)}</i>`);
   }
 
   return lines.join('\n');

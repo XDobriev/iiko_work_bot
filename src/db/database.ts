@@ -45,6 +45,7 @@ export function getDatabase(customPath?: string): DatabaseSync {
       photo_file_id TEXT,
       local_photo_path TEXT,
       raw_json TEXT,
+      model_used TEXT,
       created_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
   `);
@@ -64,7 +65,8 @@ export function getDatabase(customPath?: string): DatabaseSync {
     card_message_id: "INTEGER",
     photo_file_id: "TEXT",
     local_photo_path: "TEXT",
-    raw_json: "TEXT"
+    raw_json: "TEXT",
+    model_used: "TEXT"
   };
 
   for (const [col, colDef] of Object.entries(requiredColumns)) {
@@ -83,8 +85,26 @@ export function getDatabase(customPath?: string): DatabaseSync {
       price REAL NOT NULL DEFAULT 0,
       sum REAL NOT NULL DEFAULT 0,
       unit TEXT,
+      warehouse TEXT,
       created_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
+  `);
+
+  // Ensure warehouse column exists in invoice_items if table was created in older version
+  const itemColumns = (db.prepare(`PRAGMA table_info(invoice_items)`).all() as Array<{ name: string }>).map(c => c.name);
+  if (!itemColumns.includes('warehouse')) {
+    db.exec(`ALTER TABLE invoice_items ADD COLUMN warehouse TEXT;`);
+  }
+
+  db.exec(`
+    -- Snapshots for invoice rollback / undo functionality
+    CREATE TABLE IF NOT EXISTS invoice_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      snapshot_data TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_snapshots_invoice ON invoice_snapshots(invoice_id);
 
     -- Mapping between handwritten short names and official iiko products
     CREATE TABLE IF NOT EXISTS product_mappings (

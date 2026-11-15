@@ -44,7 +44,8 @@ async function runTestPipeline() {
       { name: 'Лук репчатый', qty: 25, price: 30, sum: 750 },      // -5 руб подешевел
       { name: 'Сыр Сулугуни', qty: 5, price: 450, sum: 2250 }      // новая позиция
     ],
-    total_written: 10200
+    total_written: 10200,
+    model_used: 'gemini-3.5-flash-lite'
   };
 
   const comparison = repo.compareWithHistory(newInvoice);

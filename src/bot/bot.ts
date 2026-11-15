@@ -2,7 +2,9 @@ import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import { config } from '../config.js';
 import { InvoiceWorkflow } from '../workflow/invoice-workflow.js';
 import { formatDailyStats, escapeHtml } from './formatter.js';
-import { InvoiceDataSchema } from '../types/index.js';
+import { InvoiceDataSchema, ModelUsageStat } from '../types/index.js';
+import { InvoicesRepository } from '../db/invoices.repo.js';
+import { checkConfiguredModels, formatModelReportHtml } from '../gemini/model-checker.js';
 
 export interface EditSession {
   invoiceId: number;
@@ -11,7 +13,12 @@ export interface EditSession {
   editPromptMessageId?: number;
 }
 
-export function createInvoiceKeyboard(invoiceId: number, hasPhoto = true, webAppUrl?: string): InlineKeyboard {
+export function createInvoiceKeyboard(
+  invoiceId: number,
+  hasPhoto = true,
+  webAppUrl?: string,
+  canUndo = false
+): InlineKeyboard {
   const kb = new InlineKeyboard()
     .text('✅ Создать в iiko', `confirm:${invoiceId}`)
     .text('❌ Отклонить', `reject:${invoiceId}`)
@@ -22,7 +29,7 @@ export function createInvoiceKeyboard(invoiceId: number, hasPhoto = true, webApp
     const fullUrl = url.includes('?') ? `${url}&invoiceId=${invoiceId}` : `${url}?invoiceId=${invoiceId}`;
     kb.webApp('📱 Редактор (Mini App)', fullUrl);
   } else {
-    kb.text('✏️ Редактировать', `edit:${invoiceId}`);
+    kb.text('🎙 Наговорить / Написать правку', `edit:${invoiceId}`);
   }
 
   kb.text('🔄 Склад', `toggle_wh:${invoiceId}`);
@@ -30,18 +37,26 @@ export function createInvoiceKeyboard(invoiceId: number, hasPhoto = true, webApp
     kb.text('🖼 Фото', `view_photo:${invoiceId}`);
   }
 
-  // If Mini App URL is active, still provide text edit on second row as alternative
+  // Row 3: quick actions (voice/text assistant & undo)
+  const row3 = kb.row();
   if (url) {
-    kb.row().text('✏️ Текст-правка', `edit:${invoiceId}`);
+    row3.text('🎙 Наговорить / Написать правку', `edit:${invoiceId}`);
+  }
+  if (canUndo) {
+    row3.text('↩️ Отменить правку', `undo:${invoiceId}`);
   }
 
   return kb;
 }
 
-export function createEditKeyboard(invoiceId: number): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('🗑 Удалить строку...', `del_picker:${invoiceId}`)
+export function createEditKeyboard(invoiceId: number, canUndo = false): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (canUndo) {
+    kb.text('↩️ Отменить правку', `undo:${invoiceId}`).row();
+  }
+  kb.text('🗑 Удалить строку...', `del_picker:${invoiceId}`)
     .text('🔙 Завершить', `finish_edit:${invoiceId}`);
+  return kb;
 }
 
 export async function updateTelegramInvoiceCard(
@@ -58,12 +73,13 @@ export async function updateTelegramInvoiceCard(
   const messageId = card.domain.invoice.card_message_id;
   const text = cardText || card.cardText;
   const photo = hasPhoto !== undefined ? hasPhoto : card.hasPhoto;
+  const canUndo = workflow.canUndo(invoiceId);
 
   if (chatId && messageId) {
     try {
       await bot.api.editMessageText(chatId, messageId, text, {
         parse_mode: 'HTML',
-        reply_markup: createInvoiceKeyboard(invoiceId, photo)
+        reply_markup: createInvoiceKeyboard(invoiceId, photo, undefined, canUndo)
       });
       return true;
     } catch (err) {
@@ -101,7 +117,7 @@ async function handleToggleWh(ctx: Context, workflow: InvoiceWorkflow, invoiceId
     return;
   }
 
-  const keyboard = createInvoiceKeyboard(invoiceId, !!res.hasPhoto);
+  const keyboard = createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId));
   try {
     await ctx.editMessageText(res.cardText, {
       parse_mode: 'HTML',
@@ -172,7 +188,11 @@ async function handleConfirm(
     const unitNotice = result.unitWarnings?.length
       ? `\n` + result.unitWarnings.map(w => `⚠️ ${escapeHtml(w)}`).join('\n')
       : '';
-    const updatedText = `${baseText}\n\n✅ <b>Создано в iiko!</b> Номер: <code>${escapeHtml(result.documentNumber || '')}</code>${modeNotice}${unmatchedNotice}${unitNotice}\n<i>Зайдите в iiko и нажмите «Провести».</i>`;
+    const docInfo = result.documentNumbers?.kitchen && result.documentNumbers?.household
+      ? `Номера накладных (раздельно по складам):\n• 🍽 Склад Кухня: <code>${escapeHtml(result.documentNumbers.kitchen)}</code>\n• 🏠 Хоз склад: <code>${escapeHtml(result.documentNumbers.household)}</code>`
+      : `Номер накладной: <code>${escapeHtml(result.documentNumber || '')}</code>`;
+
+    const updatedText = `${baseText}\n\n✅ <b>Создано в iiko!</b>\n${docInfo}${modeNotice}${unmatchedNotice}${unitNotice}\n<i>Зайдите в iikoWeb и проведите документы.</i>`;
 
     try {
       await ctx.editMessageText(updatedText, {
@@ -180,7 +200,7 @@ async function handleConfirm(
         reply_markup: undefined
       });
     } catch {
-      await ctx.reply(`✅ <b>Накладная #${invoiceId} создана в iiko!</b>\nНомер: <code>${escapeHtml(result.documentNumber || '')}</code>`, {
+      await ctx.reply(`✅ <b>Накладная #${invoiceId} создана в iiko!</b>\n${docInfo}`, {
         parse_mode: 'HTML'
       });
     }
@@ -216,6 +236,24 @@ async function handleReject(
   }
 }
 
+async function handleUndo(ctx: Context, workflow: InvoiceWorkflow, invoiceId: number): Promise<void> {
+  const res = workflow.undoEdit(invoiceId);
+  if (!res.success || !res.cardText) {
+    await ctx.answerCallbackQuery({ text: res.message || 'Нет сохраненных правок для отмены' });
+    return;
+  }
+
+  await safeReact(ctx, '↩️');
+  const keyboard = createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId));
+  try {
+    await ctx.editMessageText(res.cardText, {
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
+  } catch {}
+  await ctx.answerCallbackQuery({ text: 'Предыдущая правка отменена!' });
+}
+
 async function handleEditStart(
   ctx: Context,
   workflow: InvoiceWorkflow,
@@ -230,17 +268,22 @@ async function handleEditStart(
 
   const promptMsg = await ctx.reply(
     `✏️ <b>Редактирование накладной #${invoiceId}</b>\n\n` +
-    `📋 <i>Кликните/тапните по тексту ниже, чтобы скопировать, измените и отправьте:</i>\n\n` +
-    `<pre><code>${escapeHtml(card.editableText)}</code></pre>\n\n` +
-    `<i>Либо отправьте точечную команду:</i>\n` +
-    `• <code>1: 15 * 600</code> — изменить строку 1 (кол-во * цена)\n` +
+    `🎙 <b>Наговорите голосом</b> или <b>напишите свободным текстом:</b>\n` +
+    `• «Помидоры не по 200, а по 180»\n` +
+    `• «Поставщик ИП Ахмедов»\n` +
+    `• «Удали вторую строку и добавь перчатки 2 пачки по 150»\n\n` +
+    `<i>Либо точечной командой:</i>\n` +
+    `• <code>1: 15 * 600</code> — кол-во * цена\n` +
     `• <code>1 15 600</code> — короткий формат (строка кол-во цена)\n` +
+    `• <code>1 склад хоз</code> — перевести строку на Хоз склад\n` +
     `• <code>удалить 2</code> — удалить строку 2\n` +
-    `• <code>+ Томаты 10 * 120</code> — добавить позицию\n` +
-    `• <code>поставщик: Название</code> — сменить поставщика`,
+    `• <code>+ Салфетки 5 * 60</code> — добавить позицию\n` +
+    `• <code>поставщик: Название</code> — сменить поставщика\n\n` +
+    `📋 <i>Кликните/тапните по тексту ниже, чтобы скопировать и отредактировать:</i>\n\n` +
+    `<pre><code>${escapeHtml(card.editableText)}</code></pre>`,
     {
       parse_mode: 'HTML',
-      reply_markup: createEditKeyboard(invoiceId)
+      reply_markup: createEditKeyboard(invoiceId, workflow.canUndo(invoiceId))
     }
   );
 
@@ -301,7 +344,7 @@ async function handleDeleteItem(
     try {
       await ctx.api.editMessageText(session.chatId, session.cardMessageId, res.cardText, {
         parse_mode: 'HTML',
-        reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto)
+        reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId))
       });
     } catch {}
   }
@@ -312,7 +355,7 @@ async function handleDeleteItem(
       `Текущий состав накладной:\n<pre><code>${escapeHtml(res.editableText)}</code></pre>`,
       {
         parse_mode: 'HTML',
-        reply_markup: createEditKeyboard(invoiceId)
+        reply_markup: createEditKeyboard(invoiceId, workflow.canUndo(invoiceId))
       }
     );
   } catch {}
@@ -329,17 +372,19 @@ async function handleEditRefresh(ctx: Context, workflow: InvoiceWorkflow, invoic
   try {
     await ctx.editMessageText(
       `✏️ <b>Редактирование накладной #${invoiceId}</b>\n\n` +
-      `📋 <i>Кликните/тапните по тексту ниже, чтобы скопировать, измените и отправьте:</i>\n\n` +
-      `<pre><code>${escapeHtml(card.editableText)}</code></pre>\n\n` +
+      `🎙 <b>Наговорите голосом</b> или <b>напишите свободным текстом</b> (например: «Помидоры не по 200, а по 180»).\n\n` +
       `<i>Либо отправьте точечную команду:</i>\n` +
       `• <code>1: 15 * 600</code> — изменить строку 1 (кол-во * цена)\n` +
       `• <code>1 15 600</code> — короткий формат (строка кол-во цена)\n` +
+      `• <code>1 склад хоз</code> — перевести строку на Хоз склад\n` +
       `• <code>удалить 2</code> — удалить строку 2\n` +
-      `• <code>+ Томаты 10 * 120</code> — добавить позицию\n` +
-      `• <code>поставщик: Название</code> — сменить поставщика`,
+      `• <code>+ Салфетки 5 * 60</code> — добавить позицию\n` +
+      `• <code>поставщик: Название</code> — сменить поставщика\n\n` +
+      `📋 <i>Кликните/тапните по тексту ниже, чтобы скопировать:</i>\n\n` +
+      `<pre><code>${escapeHtml(card.editableText)}</code></pre>`,
       {
         parse_mode: 'HTML',
-        reply_markup: createEditKeyboard(invoiceId)
+        reply_markup: createEditKeyboard(invoiceId, workflow.canUndo(invoiceId))
       }
     );
   } catch {}
@@ -357,6 +402,90 @@ async function handleFinishEdit(ctx: Context, workflow: InvoiceWorkflow, session
     );
   } catch {}
   await ctx.answerCallbackQuery({ text: 'Готово!' });
+}
+
+export function formatModelsOverview(stats: ModelUsageStat[]): string {
+  const lines: string[] = [
+    '🤖 <b>Настройка моделей Gemini ресторана «Бейни»</b>',
+    '',
+    '🎯 <b>Подбор моделей по типам задач:</b>',
+    `• 📸 <b>Фото накладных (чеки):</b>\n  <code>${config.gemini.photoModels.map(escapeHtml).join(', ')}</code>`,
+    `• 🎙 <b>Голосовые заказы (аудио):</b>\n  <code>${config.gemini.voiceModels.map(escapeHtml).join(', ')}</code>`,
+    `• ⚡️ <b>Сложные чеки (каскадная эскалация):</b>\n  <code>${config.gemini.complexModels.map(escapeHtml).join(', ')}</code>`,
+    ''
+  ];
+
+  if (stats.length > 0) {
+    lines.push('📊 <b>Статистика распознаваний из базы:</b>');
+    for (const s of stats) {
+      lines.push(`• <code>${escapeHtml(s.model)}</code>: <b>${s.count}</b> накладных`);
+    }
+    lines.push('');
+  } else {
+    lines.push('📊 <i>Статистика: накладных с фиксацией модели пока нет в базе.</i>\n');
+  }
+
+  lines.push('💡 <i>Вы можете проверить онлайн-статус и отклик моделей прямо сейчас:</i>');
+  return lines.join('\n');
+}
+
+async function handleCheckModelsCallback(ctx: Context): Promise<void> {
+  await ctx.answerCallbackQuery({ text: 'Проверяю доступность моделей в Google API...' });
+  try {
+    try {
+      await ctx.editMessageText('⏳ <b>Проверяю статус и отклик моделей в Google API...</b>\n<i>Замеряю сетевую задержку...</i>', {
+        parse_mode: 'HTML'
+      });
+    } catch {
+      // ignore placeholder edit failure
+    }
+
+    const report = await checkConfiguredModels({ ping: true });
+    const text = formatModelReportHtml(report);
+    const kb = new InlineKeyboard()
+      .text('🔄 Обновить статус', 'check_models')
+      .text('📋 К статистике', 'models_overview');
+
+    await ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      reply_markup: kb
+    });
+  } catch (err: any) {
+    if (err.message?.includes('message is not modified')) {
+      return;
+    }
+    const retryKb = new InlineKeyboard()
+      .text('🔄 Повторить попытку', 'check_models')
+      .text('📋 К статистике', 'models_overview');
+    try {
+      await ctx.editMessageText(`❌ <b>Ошибка проверки моделей:</b> ${escapeHtml(err.message || String(err))}`, {
+        parse_mode: 'HTML',
+        reply_markup: retryKb
+      });
+    } catch {
+      await ctx.reply(`❌ <b>Ошибка проверки моделей:</b> ${escapeHtml(err.message || String(err))}`, {
+        parse_mode: 'HTML',
+        reply_markup: retryKb
+      });
+    }
+  }
+}
+
+async function handleModelsOverviewCallback(ctx: Context, repo: InvoicesRepository): Promise<void> {
+  await ctx.answerCallbackQuery();
+  const stats = repo.getModelStats();
+  const text = formatModelsOverview(stats);
+  const kb = new InlineKeyboard().text('🔍 Проверить статус в Google API', 'check_models');
+  try {
+    await ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      reply_markup: kb
+    });
+  } catch (err: any) {
+    if (!err.message?.includes('message is not modified')) {
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+  }
 }
 
 // --- Main bot factory ---
@@ -413,6 +542,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       '/today — сводка расходов за сегодня\n' +
       '/history — последние 10 накладных\n' +
       '/export — выгрузить CSV файл для бухгалтера\n' +
+      '/models — статус и проверка моделей Gemini\n' +
       '/app — Telegram Mini App редактор накладных\n' +
       '/help — справка по возможностям',
       { parse_mode: 'HTML' }
@@ -425,12 +555,24 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       'ℹ️ <b>Справка по возможностям:</b>\n\n' +
       '• <b>Фото накладных:</b> отправляйте по одной или пачкой — каждая накладная обрабатывается отдельно.\n' +
       '• <b>Голосовые сообщения:</b> можно надиктовать голосом («Бойня, 10 кг говядины по 600 рублей на кухню»).\n' +
+      '• <b>Подбор моделей:</b> команда /models отображает используемые модели под фото/голос/эскалацию и их отклик.\n' +
       '• <b>Mini App (WebApp):</b> удобный сенсорный редактор с пересчетом сумм и кнопочными степперами.\n' +
       '• <b>Смена склада:</b> кнопка <i>[🔄 Склад]</i> в один клик переключает Кухня ⇄ Хоз склад.\n' +
       '• <b>Сверка цен:</b> предупреждения о росте цен по сравнению с прошлыми поставками.\n' +
       '• <b>Архив фото:</b> кнопка <i>[🖼 Фото]</i> позволяет в любой момент посмотреть оригинал чека.',
       { parse_mode: 'HTML' }
     );
+  });
+
+  // /models command
+  bot.command('models', async (ctx) => {
+    const stats = repo.getModelStats();
+    const text = formatModelsOverview(stats);
+    const kb = new InlineKeyboard().text('🔍 Проверить статус в Google API', 'check_models');
+    await ctx.reply(text, {
+      parse_mode: 'HTML',
+      reply_markup: kb
+    });
   });
 
   // /app or /webapp command
@@ -568,10 +710,93 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
   // Voice handler
   bot.on('message:voice', async (ctx) => {
+    const userId = ctx.from?.id || 0;
+    const session = activeEditSessions.get(userId) || workflow.getEditSession(userId);
+    let editInvoiceId: number | null = session ? session.invoiceId : null;
+    let cardMessageId: number | null = session ? session.cardMessageId : null;
+    let chatId: number = session ? session.chatId : (ctx.chat?.id || 0);
+
+    if (!editInvoiceId && ctx.message.reply_to_message) {
+      const replyText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || '';
+      const match = replyText.match(/Накладная #(\d+)/i) || replyText.match(/накладной #(\d+)/i);
+      if (match) {
+        editInvoiceId = parseInt(match[1], 10);
+        cardMessageId = ctx.message.reply_to_message.message_id;
+      }
+    }
+
+    if (editInvoiceId) {
+      await safeReact(ctx, '👂');
+      await safeAction(ctx, 'record_voice');
+
+      const statusMsg = await ctx.reply('🎙 <i>Слушаю голосовую правку через нейросеть...</i>', {
+        parse_mode: 'HTML'
+      });
+
+      try {
+        const voice = ctx.message.voice;
+        const file = await ctx.api.getFile(voice.file_id);
+        if (!file.file_path) {
+          throw new Error('Не удалось получить путь к аудио в Telegram.');
+        }
+
+        const fileUrl = `https://api.telegram.org/file/bot${config.telegram.token}/${file.file_path}`;
+        const audioRes = await fetch(fileUrl);
+        if (!audioRes.ok) {
+          throw new Error(`Ошибка загрузки аудио: ${audioRes.status}`);
+        }
+
+        const audioBuf = Buffer.from(await audioRes.arrayBuffer());
+        const res = await workflow.applyVoiceEdit(editInvoiceId, audioBuf, 'audio/ogg');
+
+        await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
+
+        if (!res.success || !res.editableText) {
+          await ctx.reply(`⚠️ ${escapeHtml(res.message)}`, { parse_mode: 'HTML' });
+          return;
+        }
+
+        if (res.cardText && cardMessageId && chatId) {
+          try {
+            await ctx.api.editMessageText(chatId, cardMessageId, res.cardText, {
+              parse_mode: 'HTML',
+              reply_markup: createInvoiceKeyboard(editInvoiceId, !!res.hasPhoto, undefined, workflow.canUndo(editInvoiceId))
+            });
+          } catch {}
+        }
+
+        await safeReact(ctx, '⚡');
+        await ctx.reply(
+          `✅ ${escapeHtml(res.message)}\n\n` +
+          `⬆️ <b>Карточка накладной #${editInvoiceId} выше обновлена!</b>\n\n` +
+          `Текущий состав:\n<pre><code>${escapeHtml(res.editableText)}</code></pre>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: createEditKeyboard(editInvoiceId, workflow.canUndo(editInvoiceId))
+          }
+        );
+        return;
+      } catch (err: any) {
+        console.error('Ошибка применения голосовой правки:', err);
+        try {
+          await ctx.api.editMessageText(
+            ctx.chat.id,
+            statusMsg.message_id,
+            `❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`,
+            { parse_mode: 'HTML' }
+          );
+        } catch {
+          await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
+        }
+        return;
+      }
+    }
+
+    // New invoice voice recognition
     await safeReact(ctx, '👂');
     await safeAction(ctx, 'record_voice');
 
-    const statusMsg = await ctx.reply('🎙 <i>Слушаю голосовое сообщение через нейросеть...</i>', {
+    const statusMsg = await ctx.reply('🎙 <i>Слушаю голосовую накладную через нейросеть...</i>', {
       parse_mode: 'HTML'
     });
 
@@ -597,8 +822,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         messageId: ctx.message.message_id
       });
 
-      const keyboard = createInvoiceKeyboard(result.invoiceId, false);
-      const userId = ctx.from?.id || 0;
+      const keyboard = createInvoiceKeyboard(result.invoiceId, false, undefined, workflow.canUndo(result.invoiceId));
       activeEditSessions.delete(userId);
       workflow.deleteEditSession(userId);
 
@@ -627,6 +851,13 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
   // Callback query dispatcher
   bot.on('callback_query:data', async (ctx) => {
     const data = ctx.callbackQuery.data;
+    if (data === 'check_models') {
+      return handleCheckModelsCallback(ctx);
+    }
+    if (data === 'models_overview') {
+      return handleModelsOverviewCallback(ctx, repo);
+    }
+
     const [action, idStr, extra] = data.split(':');
     const invoiceId = parseInt(idStr, 10);
 
@@ -640,6 +871,8 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         return handleToggleWh(ctx, workflow, invoiceId);
       case 'view_photo':
         return handleViewPhoto(ctx, workflow, invoiceId);
+      case 'undo':
+        return handleUndo(ctx, workflow, invoiceId);
       case 'confirm':
         return handleConfirm(ctx, workflow, invoiceId, activeEditSessions);
       case 'reject':
@@ -710,7 +943,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         res.cardText,
         {
           parse_mode: 'HTML',
-          reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto)
+          reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId))
         }
       );
     } catch (err: any) {
@@ -721,7 +954,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
     }
   });
 
-  // Text message handler for active edit sessions
+  // Text message handler for active edit sessions or direct replies
   bot.on('message:text', async (ctx, next) => {
     if (ctx.message.text.startsWith('/')) {
       return next();
@@ -729,7 +962,21 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
     const userId = ctx.from?.id || 0;
     const session = activeEditSessions.get(userId) || workflow.getEditSession(userId);
-    if (!session) {
+    let invoiceId: number | null = session ? session.invoiceId : null;
+    let cardMessageId: number | null = session ? session.cardMessageId : null;
+    let chatId: number = session ? session.chatId : (ctx.chat?.id || 0);
+
+    // If no active session, check if message is a reply to an invoice card
+    if (!invoiceId && ctx.message.reply_to_message) {
+      const replyText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || '';
+      const match = replyText.match(/Накладная #(\d+)/i) || replyText.match(/накладной #(\d+)/i);
+      if (match) {
+        invoiceId = parseInt(match[1], 10);
+        cardMessageId = ctx.message.reply_to_message.message_id;
+      }
+    }
+
+    if (!invoiceId) {
       const text = ctx.message.text.trim();
       const isEditCommand =
         /^\d+[\s:]/.test(text) ||
@@ -740,7 +987,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       if (isEditCommand) {
         await ctx.reply(
           '⚠️ Сессия редактирования не найдена или была сброшена после перезапуска бота.\n' +
-          'Пожалуйста, нажмите кнопку <b>«✏️ Редактировать»</b> под карточкой накладной заново.',
+          'Пожалуйста, нажмите кнопку <b>«🎙 Наговорить / Написать правку»</b> под карточкой накладной или ответьте (Reply) на карточку накладной.',
           { parse_mode: 'HTML' }
         );
         return;
@@ -748,18 +995,21 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       return next();
     }
 
-    const res = workflow.applyTextEdit(session.invoiceId, ctx.message.text);
+    await safeReact(ctx, '✍️');
+    await safeAction(ctx, 'typing');
+
+    const res = await workflow.applyHybridEdit(invoiceId, ctx.message.text);
     if (!res.success || !res.editableText) {
       await ctx.reply(`⚠️ ${escapeHtml(res.message)}`, { parse_mode: 'HTML' });
       return;
     }
 
     // Update main card message in-place
-    if (res.cardText) {
+    if (res.cardText && cardMessageId && chatId) {
       try {
-        await ctx.api.editMessageText(session.chatId, session.cardMessageId, res.cardText, {
+        await ctx.api.editMessageText(chatId, cardMessageId, res.cardText, {
           parse_mode: 'HTML',
-          reply_markup: createInvoiceKeyboard(session.invoiceId, !!res.hasPhoto)
+          reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId))
         });
       } catch (err) {
         console.warn('Не удалось обновить карточку на месте:', err);
@@ -768,11 +1018,11 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
     await ctx.reply(
       `✅ ${escapeHtml(res.message)}\n\n` +
-      `⬆️ <b>Карточка накладной #${session.invoiceId} выше обновлена!</b>\n\n` +
+      `⬆️ <b>Карточка накладной #${invoiceId} выше обновлена!</b>\n\n` +
       `Текущий состав:\n<pre><code>${escapeHtml(res.editableText)}</code></pre>`,
       {
         parse_mode: 'HTML',
-        reply_markup: createEditKeyboard(session.invoiceId)
+        reply_markup: createEditKeyboard(invoiceId, workflow.canUndo(invoiceId))
       }
     );
   });

@@ -14,6 +14,7 @@ import {
 } from '../types/index.js';
 import { formatInvoiceMessage } from '../bot/formatter.js';
 import { formatEditableInvoice, parseInvoiceEditText } from '../bot/parser.js';
+import { partitionItemsByWarehouse } from './warehouse-classifier.js';
 
 export interface InvoiceWorkflowDeps {
   repo?: InvoicesRepository;
@@ -66,7 +67,9 @@ export interface SyncInvoiceResult {
   success: boolean;
   alreadySynced?: boolean;
   documentNumber?: string;
+  documentNumbers?: { kitchen?: string; household?: string };
   isMock?: boolean;
+  isSplit?: boolean;
   unmatched?: string[];
   unitWarnings?: string[];
   message?: string;
@@ -116,7 +119,8 @@ export class InvoiceWorkflow {
     const { invoiceId } = this.repo.saveInvoice(data, {
       userId: input.userId,
       messageId: input.messageId,
-      photoFileId: input.photoFileId
+      photoFileId: input.photoFileId,
+      modelUsed: data.model_used
     });
 
     let localPhotoPath: string | undefined;
@@ -159,7 +163,8 @@ export class InvoiceWorkflow {
 
     const { invoiceId } = this.repo.saveInvoice(data, {
       userId: input.userId,
-      messageId: input.messageId
+      messageId: input.messageId,
+      modelUsed: data.model_used
     });
 
     const cardText = `🎙 <b>Голосовая накладная:</b>\n\n` + formatInvoiceMessage(invoiceId, data, comparison);
@@ -179,6 +184,7 @@ export class InvoiceWorkflow {
       return { success: false, error: 'Накладная не найдена' };
     }
 
+    this.repo.pushSnapshot(invoiceId, domain.data);
     const newWarehouse = this.repo.toggleWarehouse(invoiceId);
     if (!newWarehouse) {
       return { success: false, error: 'Не удалось переключить склад' };
@@ -214,6 +220,7 @@ export class InvoiceWorkflow {
       return { success: false, message: parseRes.message };
     }
 
+    this.repo.pushSnapshot(invoiceId, domain.data);
     const saved = this.repo.updateInvoiceData(invoiceId, parseRes.data);
     if (!saved) {
       return { success: false, message: 'Не удалось сохранить изменения в базе' };
@@ -241,6 +248,7 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Накладная не найдена в базе' };
     }
 
+    this.repo.pushSnapshot(invoiceId, domain.data);
     const saved = this.repo.updateInvoiceData(invoiceId, data);
     if (!saved) {
       return { success: false, message: 'Не удалось сохранить изменения в базе' };
@@ -260,6 +268,141 @@ export class InvoiceWorkflow {
       editableText,
       hasPhoto
     };
+  }
+
+  async applyHybridEdit(invoiceId: number, text: string): Promise<EditInvoiceResult> {
+    const domain = this.repo.getInvoice(invoiceId);
+    if (!domain) {
+      return { success: false, message: 'Накладная не найдена в базе' };
+    }
+
+    // 1. Deterministic fast regex parser first
+    const regexRes = parseInvoiceEditText(text, domain.data);
+    if (regexRes.success && regexRes.data) {
+      this.repo.pushSnapshot(invoiceId, domain.data);
+      const saved = this.repo.updateInvoiceData(invoiceId, regexRes.data);
+      if (!saved) {
+        return { success: false, message: 'Не удалось сохранить изменения в базе' };
+      }
+
+      const comparison = this.repo.compareWithHistory(regexRes.data, 'beyni', invoiceId);
+      const cardText = formatInvoiceMessage(invoiceId, regexRes.data, comparison);
+      const editableText = formatEditableInvoice(regexRes.data);
+      const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
+
+      return {
+        success: true,
+        message: regexRes.message,
+        data: regexRes.data,
+        comparison,
+        cardText,
+        editableText,
+        hasPhoto
+      };
+    }
+
+    // 2. Free text natural language via Gemini
+    try {
+      const aiRes = await this.recognizer.recognizeEdit(domain.data, text);
+      this.repo.pushSnapshot(invoiceId, domain.data);
+      const saved = this.repo.updateInvoiceData(invoiceId, aiRes.data);
+      if (!saved) {
+        return { success: false, message: 'Не удалось сохранить изменения в базе' };
+      }
+
+      const comparison = this.repo.compareWithHistory(aiRes.data, 'beyni', invoiceId);
+      const cardText = formatInvoiceMessage(invoiceId, aiRes.data, comparison);
+      const editableText = formatEditableInvoice(aiRes.data);
+      const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
+
+      return {
+        success: true,
+        message: `🤖 ${aiRes.summary}`,
+        data: aiRes.data,
+        comparison,
+        cardText,
+        editableText,
+        hasPhoto
+      };
+    } catch (aiErr: any) {
+      console.warn('[Workflow] Gemini edit fallback:', aiErr?.message);
+      return {
+        success: false,
+        message: regexRes.message || 'Не удалось распознать формат правки.'
+      };
+    }
+  }
+
+  async applyVoiceEdit(invoiceId: number, audioBuffer: Buffer, mimeType = 'audio/ogg'): Promise<EditInvoiceResult> {
+    const domain = this.repo.getInvoice(invoiceId);
+    if (!domain) {
+      return { success: false, message: 'Накладная не найдена в базе' };
+    }
+
+    try {
+      const aiRes = await this.recognizer.recognizeVoiceEdit(domain.data, audioBuffer, mimeType);
+      this.repo.pushSnapshot(invoiceId, domain.data);
+      const saved = this.repo.updateInvoiceData(invoiceId, aiRes.data);
+      if (!saved) {
+        return { success: false, message: 'Не удалось сохранить изменения в базе' };
+      }
+
+      const comparison = this.repo.compareWithHistory(aiRes.data, 'beyni', invoiceId);
+      const cardText = formatInvoiceMessage(invoiceId, aiRes.data, comparison);
+      const editableText = formatEditableInvoice(aiRes.data);
+      const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
+
+      return {
+        success: true,
+        message: `🎙 ${aiRes.summary}`,
+        data: aiRes.data,
+        comparison,
+        cardText,
+        editableText,
+        hasPhoto
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Не удалось распознать голосовую правку: ${err.message}`
+      };
+    }
+  }
+
+  undoEdit(invoiceId: number): EditInvoiceResult {
+    const domain = this.repo.getInvoice(invoiceId);
+    if (!domain) {
+      return { success: false, message: 'Накладная не найдена в базе' };
+    }
+
+    const prevData = this.repo.popSnapshot(invoiceId);
+    if (!prevData) {
+      return { success: false, message: 'Нет предыдущих сохраненных правок для отмены.' };
+    }
+
+    const saved = this.repo.updateInvoiceData(invoiceId, prevData);
+    if (!saved) {
+      return { success: false, message: 'Не удалось восстановить накладную в базе.' };
+    }
+
+    const comparison = this.repo.compareWithHistory(prevData, 'beyni', invoiceId);
+    const cardText = formatInvoiceMessage(invoiceId, prevData, comparison);
+    const editableText = formatEditableInvoice(prevData);
+    const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
+
+    return {
+      success: true,
+      message: '↩️ Предыдущая правка отменена, данные возвращены!',
+      data: prevData,
+      comparison,
+      cardText,
+      editableText,
+      hasPhoto
+    };
+  }
+
+  canUndo(invoiceId: number): boolean {
+    return this.repo.hasSnapshot(invoiceId);
   }
 
   saveProductMapping(rawName: string, iikoProductName: string, iikoProductId?: string): void {
@@ -288,6 +431,7 @@ export class InvoiceWorkflow {
       items: updatedItems
     };
 
+    this.repo.pushSnapshot(invoiceId, domain.data);
     const saved = this.repo.updateInvoiceData(invoiceId, updatedData);
     if (!saved) {
       return { success: false, error: 'Не удалось обновить накладную в базе' };
@@ -323,13 +467,86 @@ export class InvoiceWorkflow {
       };
     }
 
-    const result = await this.iikoClient.createInvoice(domain.data);
+    const { kitchen, household, isMixed } = partitionItemsByWarehouse(domain.data.items);
+
+    if (isMixed) {
+      // Create TWO separate draft invoices in iikoWeb
+      const kitchenData: InvoiceData = {
+        ...domain.data,
+        warehouse: 'kitchen',
+        items: kitchen,
+        notes: (domain.data.notes ? domain.data.notes + ' ' : '') + '[Склад Кухня]'
+      };
+
+      const householdData: InvoiceData = {
+        ...domain.data,
+        warehouse: 'household',
+        items: household,
+        notes: (domain.data.notes ? domain.data.notes + ' ' : '') + '[Хоз склад]'
+      };
+
+      const [resKitchen, resHousehold] = await Promise.all([
+        this.iikoClient.createInvoice(kitchenData),
+        this.iikoClient.createInvoice(householdData)
+      ]);
+
+      if (resKitchen.success && resHousehold.success) {
+        const combinedDocNum = `🍽 Кухня: ${resKitchen.documentNumber || '—'}, 🏠 Хоз: ${resHousehold.documentNumber || '—'}`;
+        this.repo.updateInvoiceStatus(invoiceId, 'synced', combinedDocNum);
+
+        const allUnmatched = [...(resKitchen.unmatched || []), ...(resHousehold.unmatched || [])];
+        const allUnitWarnings = [...(resKitchen.unitWarnings || []), ...(resHousehold.unitWarnings || [])];
+
+        return {
+          success: true,
+          documentNumber: combinedDocNum,
+          documentNumbers: {
+            kitchen: resKitchen.documentNumber,
+            household: resHousehold.documentNumber
+          },
+          isMock: Boolean(resKitchen.isMock || resHousehold.isMock),
+          isSplit: true,
+          unmatched: allUnmatched.length ? allUnmatched : undefined,
+          unitWarnings: allUnitWarnings.length ? allUnitWarnings : undefined,
+          message: `Создано 2 накладных: Склад Кухня (${resKitchen.documentNumber}) и Хоз склад (${resHousehold.documentNumber})`
+        };
+      }
+
+      if (!resKitchen.success) {
+        return {
+          success: false,
+          message: `Ошибка отправки накладной «Кухня» в iiko: ${resKitchen.message}`
+        };
+      }
+
+      return {
+        success: false,
+        message: `Ошибка отправки накладной «Хоз склад» в iiko: ${resHousehold.message}`
+      };
+    }
+
+    // Single category invoice
+    const targetWh: WarehouseType =
+      household.length > 0 && kitchen.length === 0
+        ? 'household'
+        : kitchen.length > 0 && household.length === 0
+        ? 'kitchen'
+        : (domain.data.warehouse || 'kitchen');
+
+    const singleData: InvoiceData = {
+      ...domain.data,
+      warehouse: targetWh,
+      items: domain.data.items.map(it => ({ ...it, warehouse: targetWh }))
+    };
+
+    const result = await this.iikoClient.createInvoice(singleData);
     if (result.success) {
       this.repo.updateInvoiceStatus(invoiceId, 'synced', result.documentNumber);
       return {
         success: true,
         documentNumber: result.documentNumber,
         isMock: result.isMock,
+        isSplit: false,
         unmatched: result.unmatched,
         unitWarnings: result.unitWarnings,
         message: result.message

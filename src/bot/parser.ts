@@ -1,4 +1,5 @@
-import { InvoiceData, InvoiceItem } from '../types/index.js';
+import { InvoiceData, InvoiceItem, WarehouseType } from '../types/index.js';
+import { classifyItemWarehouse, isHouseholdItemName } from '../workflow/warehouse-classifier.js';
 
 export interface ParseEditResult {
   success: boolean;
@@ -73,6 +74,32 @@ export function parseQuantityAndUnit(raw: string): { qty: number; unit?: string 
 }
 
 /**
+ * Extracts and removes warehouse tags ([хоз], [кухня]) from raw item name,
+ * returning clean name and detected/fallback warehouse.
+ */
+export function extractNameAndWarehouse(
+  rawName: string,
+  fallbackWarehouse?: WarehouseType
+): { name: string; warehouse?: WarehouseType } {
+  let cleanName = rawName.trim();
+  let itemWh: WarehouseType | undefined;
+
+  if (/\[\s*(хоз\S*|house\S*)\s*\]/i.test(cleanName)) {
+    itemWh = 'household';
+    cleanName = cleanName.replace(/\[\s*(хоз\S*|house\S*)\s*\]/i, '').trim();
+  } else if (/\[\s*(кухн\S*|kitchen\S*)\s*\]/i.test(cleanName)) {
+    itemWh = 'kitchen';
+    cleanName = cleanName.replace(/\[\s*(кухн\S*|kitchen\S*)\s*\]/i, '').trim();
+  } else if (isHouseholdItemName(cleanName)) {
+    itemWh = 'household';
+  } else if (fallbackWarehouse) {
+    itemWh = fallbackWarehouse;
+  }
+
+  return { name: cleanName, warehouse: itemWh };
+}
+
+/**
  * Formats invoice into a compact, easily readable and editable text block.
  * When rendered in <code> in Telegram, a single click/tap copies it to clipboard.
  */
@@ -84,7 +111,10 @@ export function formatEditableInvoice(data: InvoiceData): string {
 
   data.items.forEach((item, index) => {
     const unitStr = item.unit ? ` ${item.unit}` : '';
-    lines.push(`${index + 1}. ${item.name}: ${item.qty}${unitStr} * ${item.price}`);
+    const whTag = (item.warehouse && item.warehouse !== data.warehouse)
+      ? ` [${item.warehouse === 'household' ? 'хоз' : 'кухня'}]`
+      : '';
+    lines.push(`${index + 1}. ${item.name}${whTag}: ${item.qty}${unitStr} * ${item.price}`);
   });
 
   return lines.join('\n');
@@ -108,8 +138,8 @@ export function splitNameAndQuantity(str: string): { name?: string; qtyStr: stri
     return { name: colonMatch[1].trim(), qtyStr: colonMatch[2].trim() };
   }
 
-  // If there are words before digits (e.g. "Оливки 1 бан" or "Томаты черри 4*6.5кг")
-  const wordPrefixMatch = trimmed.match(/^([a-zа-яё\s"«»№]+?)\s+([\d(].*)$/i);
+  // If there are words before digits (e.g. "Оливки 1 бан" or "Томаты черри 4*6.5кг" or "Расходники [хоз] 1")
+  const wordPrefixMatch = trimmed.match(/^([a-zа-яё\s"«»№\[\]]+?)\s+([\d(].*)$/i);
   if (wordPrefixMatch) {
     return { name: wordPrefixMatch[1].trim(), qtyStr: wordPrefixMatch[2].trim() };
   }
@@ -173,8 +203,29 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
     const whMatch = single.match(/^склад\s*[:\-–]\s*(кухня|хоз|хозсклад|kitchen|household)/i);
     if (whMatch) {
       const val = whMatch[1].toLowerCase();
-      updated.warehouse = (val.includes('хоз') || val.includes('house')) ? 'household' : 'kitchen';
-      return { success: true, data: updated, message: `Склад изменен на «${updated.warehouse === 'household' ? 'Хоз склад' : 'Склад Кухня'}».` };
+      const newWh: WarehouseType = (val.includes('хоз') || val.includes('house')) ? 'household' : 'kitchen';
+      updated.warehouse = newWh;
+      for (const it of updated.items) {
+        it.warehouse = newWh;
+      }
+      return { success: true, data: updated, message: `Склад изменен на «${newWh === 'household' ? 'Хоз склад' : 'Склад Кухня'}».` };
+    }
+
+    // 1b-2. Item warehouse command: e.g. "1: склад хоз", "1 склад кухня", "1 хоз", "1 кухня", "#1 - хоз", "1 - хоз"
+    const whItemMatch = single.match(/^#?(\d+)[\s.:)\-–]+(?:склад\s+)?(кухня|хоз|хозсклад|kitchen|household)$/i);
+    if (whItemMatch) {
+      const idx = parseInt(whItemMatch[1], 10) - 1;
+      if (idx < 0 || idx >= updated.items.length) {
+        return { success: false, message: `Строка #${idx + 1} не найдена. Всего строк: ${updated.items.length}.` };
+      }
+      const val = whItemMatch[2].toLowerCase();
+      const newWh: WarehouseType = (val.includes('хоз') || val.includes('house')) ? 'household' : 'kitchen';
+      updated.items[idx].warehouse = newWh;
+      return {
+        success: true,
+        data: updated,
+        message: `🏭 Позиция #${idx + 1} «${updated.items[idx].name}» переведена на ${newWh === 'household' ? 'Хоз склад' : 'Склад Кухня'}.`
+      };
     }
 
     // 1c. Add command: "+ Томаты 4*6.5кг * 150" or "+ Оливки 1бан = 180" or "добавить Сыр 1.2кг * 500"
@@ -187,17 +238,18 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
       if (equalIdx > 0) {
         const left = rest.slice(0, equalIdx).trim();
         const totalSum = evaluateMath(rest.slice(equalIdx + 1));
-        const { name, qtyStr } = splitNameAndQuantity(left);
+        const { name: rawName, qtyStr } = splitNameAndQuantity(left);
         const parsedQty = parseQuantityAndUnit(qtyStr);
 
-        if (name && parsedQty && totalSum !== null && parsedQty.qty > 0) {
+        if (rawName && parsedQty && totalSum !== null && parsedQty.qty > 0) {
+          const { name, warehouse: itemWh } = extractNameAndWarehouse(rawName, updated.warehouse || 'kitchen');
           const price = Math.round((totalSum / parsedQty.qty) * 100) / 100;
           const unit = parsedQty.unit || 'шт';
-          updated.items.push({ name, qty: parsedQty.qty, price, sum: totalSum, unit });
+          updated.items.push({ name, qty: parsedQty.qty, price, sum: totalSum, unit, warehouse: itemWh });
           return {
             success: true,
             data: updated,
-            message: `➕ Добавлена строка #${updated.items.length}: «${name}» — ${parsedQty.qty} ${unit} по ${price} ₽ = ${totalSum} ₽.`
+            message: `➕ Добавлена строка #${updated.items.length}: «${name}» (${itemWh === 'household' ? 'Хоз' : 'Кухня'}) — ${parsedQty.qty} ${unit} по ${price} ₽ = ${totalSum} ₽.`
           };
         }
       }
@@ -208,16 +260,17 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
         const left = rest.slice(0, lastMultIdx).trim();
         const price = evaluateMath(rest.slice(lastMultIdx + 1));
         if (price !== null) {
-          const { name, qtyStr } = splitNameAndQuantity(left);
+          const { name: rawName, qtyStr } = splitNameAndQuantity(left);
           const parsedQty = parseQuantityAndUnit(qtyStr);
-          if (name && parsedQty && parsedQty.qty > 0) {
+          if (rawName && parsedQty && parsedQty.qty > 0) {
+            const { name, warehouse: itemWh } = extractNameAndWarehouse(rawName, updated.warehouse || 'kitchen');
             const sum = Math.round(parsedQty.qty * price * 100) / 100;
             const unit = parsedQty.unit || 'шт';
-            updated.items.push({ name, qty: parsedQty.qty, price, sum, unit });
+            updated.items.push({ name, qty: parsedQty.qty, price, sum, unit, warehouse: itemWh });
             return {
               success: true,
               data: updated,
-              message: `➕ Добавлена строка #${updated.items.length}: «${name}» — ${parsedQty.qty} ${unit} по ${price} ₽ = ${sum} ₽.`
+              message: `➕ Добавлена строка #${updated.items.length}: «${name}» (${itemWh === 'household' ? 'Хоз' : 'Кухня'}) — ${parsedQty.qty} ${unit} по ${price} ₽ = ${sum} ₽.`
             };
           }
         }
@@ -229,16 +282,17 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
         const price = evaluateMath(rest.slice(lastSpaceIdx + 1));
         if (price !== null) {
           const left = rest.slice(0, lastSpaceIdx).trim();
-          const { name, qtyStr } = splitNameAndQuantity(left);
+          const { name: rawName, qtyStr } = splitNameAndQuantity(left);
           const parsedQty = parseQuantityAndUnit(qtyStr);
-          if (name && parsedQty && parsedQty.qty > 0) {
+          if (rawName && parsedQty && parsedQty.qty > 0) {
+            const { name, warehouse: itemWh } = extractNameAndWarehouse(rawName, updated.warehouse || 'kitchen');
             const sum = Math.round(parsedQty.qty * price * 100) / 100;
             const unit = parsedQty.unit || 'шт';
-            updated.items.push({ name, qty: parsedQty.qty, price, sum, unit });
+            updated.items.push({ name, qty: parsedQty.qty, price, sum, unit, warehouse: itemWh });
             return {
               success: true,
               data: updated,
-              message: `➕ Добавлена строка #${updated.items.length}: «${name}» — ${parsedQty.qty} ${unit} по ${price} ₽ = ${sum} ₽.`
+              message: `➕ Добавлена строка #${updated.items.length}: «${name}» (${itemWh === 'household' ? 'Хоз' : 'Кухня'}) — ${parsedQty.qty} ${unit} по ${price} ₽ = ${sum} ₽.`
             };
           }
         }
@@ -265,7 +319,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
 
         if (parsedQty && totalSum !== null && parsedQty.qty > 0) {
           if (name && name.length > 1) {
-            updated.items[idx].name = name;
+            const extracted = extractNameAndWarehouse(name);
+            updated.items[idx].name = extracted.name;
+            if (extracted.warehouse) {
+              updated.items[idx].warehouse = extracted.warehouse;
+            }
           }
           const price = Math.round((totalSum / parsedQty.qty) * 100) / 100;
           updated.items[idx].qty = parsedQty.qty;
@@ -296,7 +354,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
 
           if (parsedQty && parsedQty.qty > 0) {
             if (name && name.length > 1) {
-              updated.items[idx].name = name;
+              const extracted = extractNameAndWarehouse(name);
+              updated.items[idx].name = extracted.name;
+              if (extracted.warehouse) {
+                updated.items[idx].warehouse = extracted.warehouse;
+              }
             }
             updated.items[idx].qty = parsedQty.qty;
             updated.items[idx].price = price;
@@ -326,7 +388,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
 
           if (parsedQty && parsedQty.qty > 0) {
             if (name && name.length > 1) {
-              updated.items[idx].name = name;
+              const extracted = extractNameAndWarehouse(name);
+              updated.items[idx].name = extracted.name;
+              if (extracted.warehouse) {
+                updated.items[idx].warehouse = extracted.warehouse;
+              }
             }
             updated.items[idx].qty = parsedQty.qty;
             updated.items[idx].price = price;
@@ -382,13 +448,15 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
       const parsedQty = parseQuantityAndUnit(qtyStr);
 
       if (name && parsedQty && totalSum !== null && parsedQty.qty > 0) {
+        const { name: cleanName, warehouse: itemWh } = extractNameAndWarehouse(name, updated.warehouse || 'kitchen');
         const price = Math.round((totalSum / parsedQty.qty) * 100) / 100;
         newItems.push({
-          name,
+          name: cleanName,
           qty: parsedQty.qty,
           price,
           sum: totalSum,
-          unit: parsedQty.unit || 'шт'
+          unit: parsedQty.unit || 'шт',
+          warehouse: itemWh || 'kitchen'
         });
         foundAnyItem = true;
         continue;
@@ -408,12 +476,14 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
         const { name, qtyStr } = splitNameAndQuantity(left);
         const parsedQty = parseQuantityAndUnit(qtyStr);
         if (name && parsedQty && parsedQty.qty > 0) {
+          const { name: cleanName, warehouse: itemWh } = extractNameAndWarehouse(name, updated.warehouse || 'kitchen');
           newItems.push({
-            name,
+            name: cleanName,
             qty: parsedQty.qty,
             price,
             sum: Math.round(parsedQty.qty * price * 100) / 100,
-            unit: parsedQty.unit || 'шт'
+            unit: parsedQty.unit || 'шт',
+            warehouse: itemWh || 'kitchen'
           });
           foundAnyItem = true;
           continue;

@@ -16,7 +16,14 @@ export const InvoiceItemSchema = z.object({
     const n = Number(val);
     return isNaN(n) ? 0 : Math.max(0, n);
   }, z.number().nonnegative().default(0)),
-  unit: z.string().optional()
+  unit: z.string().optional(),
+  warehouse: z.preprocess((val) => {
+    if (!val) return undefined;
+    const s = String(val).toLowerCase();
+    if (s.includes('house') || s.includes('хоз')) return 'household';
+    if (s.includes('kitchen') || s.includes('кухн')) return 'kitchen';
+    return undefined;
+  }, z.enum(['kitchen', 'household']).optional())
 });
 
 export type InvoiceItem = z.infer<typeof InvoiceItemSchema>;
@@ -35,7 +42,8 @@ export const InvoiceDataSchema = z.object({
     const n = Number(val);
     return isNaN(n) ? null : n;
   }, z.number().nullable().default(null)),
-  notes: z.string().optional()
+  notes: z.string().optional(),
+  model_used: z.string().optional()
 });
 
 export type InvoiceData = z.infer<typeof InvoiceDataSchema>;
@@ -56,6 +64,9 @@ export interface InvoiceRecord {
   telegram_message_id?: number | null;
   card_message_id?: number | null;
   photo_file_id?: string | null;
+  local_photo_path?: string | null;
+  raw_json?: string | null;
+  model_used?: string | null;
   created_at: string;
 }
 
@@ -67,6 +78,7 @@ export interface InvoiceItemRecord {
   price: number;
   sum: number;
   unit?: string;
+  warehouse?: WarehouseType;
   created_at: string;
 }
 
@@ -104,6 +116,12 @@ export interface PriceComparisonItem {
 export interface KnownItemWithUnit {
   name: string;
   unit?: string;
+}
+
+export interface ModelUsageStat {
+  model: string;
+  count: number;
+  lastUsed: string;
 }
 
 export interface HistoricalComparison {
