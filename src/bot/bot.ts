@@ -207,12 +207,34 @@ async function handleConfirm(
         parse_mode: 'HTML'
       });
     }
-  } else {
+  } else if (result.isSplit && result.documentNumber) {
+    // Partial split sync: kitchen succeeded, household failed.
+    // Database is already in 'synced' state to avoid kitchen duplicates on retry.
+    await safeReact(ctx, '⚠️');
+    const baseText = card.cardText;
+    const partialCardText = `${baseText}\n\n⚠️ <b>Частично создано в iiko!</b>\n• 🍽 Склад Кухня: <code>${escapeHtml(result.documentNumber)}</code>\n• 🏠 Хоз склад: <i>Ошибка отправки</i>\n\n<i>Накладная кухни создана в iikoWeb. Хоз склад не был добавлен во избежание дублирования.</i>`;
+    try {
+      await ctx.editMessageText(partialCardText, {
+        parse_mode: 'HTML',
+        reply_markup: undefined
+      });
+    } catch {}
+
+    await ctx.reply(
+      `⚠️ <b>Частичное создание в iiko:</b>\n\n${escapeHtml(result.message || '')}\n\n<i>Накладная «Кухня» уже создана в iikoWeb (#${escapeHtml(result.documentNumber)}). Неотправленные позиции хоз склада можно провести вручную в iikoWeb или прислать отдельным сообщением.</i>`,
+      { parse_mode: 'HTML' }
+    );
+  } else if (result.unmatched && result.unmatched.length > 0) {
     await safeReact(ctx, '⚠️');
     await ctx.reply(
       `⚠️ <b>Создание в iiko заблокировано:</b>\n\n${escapeHtml(result.message || 'Обнаружены несопоставленные позиции')}\n\n<i>Откройте [📱 Редактор (Mini App)], выберите товары из номенклатуры и нажмите «Создать в iiko».</i>`,
       { parse_mode: 'HTML' }
     );
+  } else {
+    await safeReact(ctx, '⚠️');
+    await ctx.reply(`⚠️ <b>Ошибка iiko:</b> ${escapeHtml(result.message || 'Неизвестная ошибка')}`, {
+      parse_mode: 'HTML'
+    });
   }
 }
 
@@ -222,14 +244,24 @@ async function handleReject(
   invoiceId: number,
   sessions: Map<number, EditSession>
 ): Promise<void> {
-  workflow.rejectInvoice(invoiceId);
+  const card = workflow.getInvoiceCard(invoiceId);
+  if (card && card.domain.invoice.status === 'synced') {
+    await ctx.answerCallbackQuery({ text: 'Накладная уже была создана в iiko и не может быть отклонена!' });
+    return;
+  }
+
+  const rejectRes = workflow.rejectInvoice(invoiceId);
+  if (!rejectRes.success) {
+    await ctx.answerCallbackQuery({ text: rejectRes.error || 'Ошибка отклонения накладной' });
+    return;
+  }
+
   const userId = ctx.from?.id || 0;
   sessions.delete(userId);
   workflow.deleteEditSession(userId);
   await safeReact(ctx, '🗑');
   await ctx.answerCallbackQuery({ text: 'Накладная отклонена' });
 
-  const card = workflow.getInvoiceCard(invoiceId);
   const baseText = card ? card.cardText : (ctx.callbackQuery?.message?.text ? escapeHtml(ctx.callbackQuery.message.text) : '');
   try {
     await ctx.editMessageText(`${baseText}\n\n❌ <b>Накладная отклонена.</b>`, {
@@ -354,7 +386,8 @@ async function handleDeleteItem(
   workflow: InvoiceWorkflow,
   invoiceId: number,
   itemIdx: number,
-  sessions: Map<number, EditSession>
+  sessions: Map<number, EditSession>,
+  bot?: Bot
 ): Promise<void> {
   const res = workflow.deleteItem(invoiceId, itemIdx);
   if (!res.success || !res.removedItem || !res.editableText) {
@@ -363,15 +396,19 @@ async function handleDeleteItem(
   }
 
   // Update main card message in-place
-  const userId = ctx.from?.id || 0;
-  const session = sessions.get(userId) || workflow.getEditSession(userId);
-  if (session?.cardMessageId && session?.chatId && res.cardText) {
-    try {
-      await ctx.api.editMessageText(session.chatId, session.cardMessageId, res.cardText, {
-        parse_mode: 'HTML',
-        reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId))
-      });
-    } catch {}
+  if (bot) {
+    await updateTelegramInvoiceCard(bot, workflow, invoiceId, res.cardText, !!res.hasPhoto);
+  } else {
+    const userId = ctx.from?.id || 0;
+    const session = sessions.get(userId) || workflow.getEditSession(userId);
+    if (session?.cardMessageId && session?.chatId && res.cardText) {
+      try {
+        await ctx.api.editMessageText(session.chatId, session.cardMessageId, res.cardText, {
+          parse_mode: 'HTML',
+          reply_markup: createInvoiceKeyboard(invoiceId, !!res.hasPhoto, undefined, workflow.canUndo(invoiceId))
+        });
+      } catch {}
+    }
   }
 
   try {
@@ -908,7 +945,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         return handleDeletePicker(ctx, workflow, invoiceId);
       case 'del_item': {
         const itemIdx = parseInt(extra, 10);
-        return handleDeleteItem(ctx, workflow, invoiceId, itemIdx, activeEditSessions);
+        return handleDeleteItem(ctx, workflow, invoiceId, itemIdx, activeEditSessions, bot);
       }
       case 'edit_refresh':
         return handleEditRefresh(ctx, workflow, invoiceId);

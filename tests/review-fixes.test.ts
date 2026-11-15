@@ -196,6 +196,16 @@ test('workflow blocks all modifications for synced invoices', async () => {
   });
   assert.strictEqual(dataRes.success, false);
   assert.match(dataRes.message || '', /уже была создана в iiko/);
+
+  // 7. applyTextEdit
+  const textRes = workflow.applyTextEdit(invoiceId, '1: 15 * 900');
+  assert.strictEqual(textRes.success, false);
+  assert.match(textRes.message || '', /уже была создана в iiko/);
+
+  // 8. rejectInvoice
+  const rejectRes = workflow.rejectInvoice(invoiceId);
+  assert.strictEqual(rejectRes.success, false);
+  assert.match(rejectRes.error || '', /уже была создана в iiko/);
 });
 
 // 6. [IMPORTANT] updateTelegramInvoiceCard uses stored card_message_id

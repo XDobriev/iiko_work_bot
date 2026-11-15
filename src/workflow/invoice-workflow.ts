@@ -295,6 +295,10 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Накладная не найдена в базе' };
     }
 
+    if (domain.invoice.status === 'synced') {
+      return { success: false, message: 'Накладная уже была создана в iiko и не может быть изменена.' };
+    }
+
     const parseRes = parseInvoiceEditText(text, domain.data);
     if (!parseRes.success || !parseRes.data) {
       return { success: false, message: parseRes.message };
@@ -692,6 +696,10 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) {
       return { success: false, error: 'Накладная не найдена' };
+    }
+
+    if (domain.invoice.status === 'synced') {
+      return { success: false, error: 'Накладная уже была создана в iiko и не может быть отклонена.' };
     }
 
     const ok = this.repo.updateInvoiceStatus(invoiceId, 'rejected');
