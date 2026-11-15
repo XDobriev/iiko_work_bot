@@ -12,7 +12,7 @@ import {
   GeminiAutopilot
 } from '../src/gemini/autopilot.js';
 import { GoogleModelInfo } from '../src/gemini/model-checker.js';
-import { GeminiInvoiceRecognizer } from '../src/gemini/recognizer.js';
+import { GeminiInvoiceRecognizer, extractCandidateText } from '../src/gemini/recognizer.js';
 
 test('isEligibleGeminiModel filters models properly and rejects non-target utilities', () => {
   const eligibleCandidate: GoogleModelInfo = {
@@ -245,7 +245,7 @@ test('rankModels prioritizes reasoning for photo and complex, audio for voice, a
   assert.ok(argon?.rejectionReason?.includes('429'));
 });
 
-test('rankModels falls back cleanly to fallbackConfig when 0 models are operational', () => {
+test('rankModels falls back cleanly to fallbackConfig when 0 models are operational with short recovery TTL', () => {
   const fallbackConfig = {
     photoModels: ['fb-photo-1', 'fb-photo-2'],
     voiceModels: ['fb-voice-1'],
@@ -266,11 +266,14 @@ test('rankModels falls back cleanly to fallbackConfig when 0 models are operatio
     }
   ];
 
+  const now = Date.now();
   const plan = rankModels(failedModels, fallbackConfig as any);
   assert.strictEqual(plan.fromFallback, true);
   assert.deepStrictEqual(plan.photoModels, ['fb-photo-1', 'fb-photo-2']);
   assert.deepStrictEqual(plan.voiceModels, ['fb-voice-1']);
   assert.deepStrictEqual(plan.complexModels, ['fb-complex-1']);
+  const remainingTtlMs = new Date(plan.expiresAt).getTime() - now;
+  assert.ok(remainingTtlMs <= 65 * 1000 && remainingTtlMs >= 40 * 1000, `Fallback TTL should be ~60s, got ${remainingTtlMs}ms`);
 });
 
 test('formatAutopilotReportHtml formats Telegram HTML with proper badges and escaping', () => {
@@ -381,4 +384,88 @@ test('GeminiInvoiceRecognizer seamlessly uses dynamic Autopilot models when unco
     photoModels: ['explicit-photo']
   }, mockAutopilot);
   assert.deepStrictEqual(explicitRecognizer.getCandidateModels('photo'), ['explicit-photo']);
+});
+
+test('extractCandidateText skips thought parts in reasoning models and extracts JSON text payload', () => {
+  // Scenario 1: Multi-part reasoning response where part 0 is a thought scratchpad
+  const candidateWithThoughts = {
+    content: {
+      parts: [
+        {
+          thought: true,
+          text: 'Internal thinking scratchpad: checking handwritten numbers 15 and 580...'
+        },
+        {
+          text: '{"summary": "Поставщик Мясо", "data": {"date": "15.11.2026", "items": []}}'
+        }
+      ]
+    }
+  };
+
+  const extracted = extractCandidateText(candidateWithThoughts);
+  assert.strictEqual(extracted, '{"summary": "Поставщик Мясо", "data": {"date": "15.11.2026", "items": []}}');
+  assert.ok(!extracted?.includes('Internal thinking'));
+
+  // Scenario 2: Standard single-part response
+  const standardCandidate = {
+    content: {
+      parts: [
+        {
+          text: '{"data": {}}'
+        }
+      ]
+    }
+  };
+  assert.strictEqual(extractCandidateText(standardCandidate), '{"data": {}}');
+
+  // Scenario 3: Empty / missing candidate
+  assert.strictEqual(extractCandidateText(null), undefined);
+  assert.strictEqual(extractCandidateText({}), undefined);
+});
+
+test('GeminiAutopilot singleton handles reset, key updates, and concurrency deduplication', async () => {
+  GeminiAutopilot.resetInstance();
+
+  const ap1 = GeminiAutopilot.getInstance('key-1', 10000);
+  assert.ok(ap1);
+
+  // Calling with key-2 updates key on singleton
+  const ap2 = GeminiAutopilot.getInstance('key-2');
+  assert.strictEqual(ap1, ap2);
+
+  // Resetting singleton clears instance
+  GeminiAutopilot.resetInstance();
+  const ap3 = GeminiAutopilot.getInstance('key-3');
+  assert.notStrictEqual(ap1, ap3);
+
+  GeminiAutopilot.resetInstance();
+});
+
+test('detectReasoningCapability rejects false-positive thoughtSignature without real thoughts', () => {
+  const standardFlashModel: GoogleModelInfo = {
+    name: 'gemini-3.5-flash-lite',
+    rawName: 'models/gemini-3.5-flash-lite',
+    displayName: 'Gemini 3.5 Flash Lite',
+    supportedGenerationMethods: ['generateContent']
+  };
+
+  // When Google API returns normal text with watermark thoughtSignature, it MUST NOT be treated as reasoning
+  assert.strictEqual(
+    detectReasoningCapability(standardFlashModel, { hasReasoning: false }),
+    false
+  );
+  assert.strictEqual(
+    detectReasoningCapability(standardFlashModel, { hasReasoning: false, thoughtsTokenCount: 0 }),
+    false
+  );
+
+  // But if real thoughtsTokenCount > 0 or hasReasoning is true
+  assert.strictEqual(
+    detectReasoningCapability(standardFlashModel, { hasReasoning: true }),
+    true
+  );
+  assert.strictEqual(
+    detectReasoningCapability(standardFlashModel, { thoughtsTokenCount: 42 }),
+    true
+  );
 });

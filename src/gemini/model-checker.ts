@@ -106,7 +106,7 @@ export async function pingModel(
         contents: [{ parts: [{ text: '1+1=' }] }],
         generationConfig: { maxOutputTokens: 5, temperature: 0 }
       }),
-      signal: AbortSignal.timeout(12000)
+      signal: AbortSignal.timeout(15000)
     });
 
     const latencyMs = Date.now() - start;
@@ -121,8 +121,8 @@ export async function pingModel(
       const json = (await response.json()) as any;
       thoughtsTokenCount = json.usageMetadata?.thoughtsTokenCount;
       const candidateParts = json.candidates?.[0]?.content?.parts || [];
-      const hasThoughtPart = candidateParts.some((p: any) => p.thought === true || typeof p.thoughtSignature === 'string');
-      hasReasoning = Boolean((typeof thoughtsTokenCount === 'number' && thoughtsTokenCount > 0) || hasThoughtPart);
+      const hasExplicitThoughtPart = candidateParts.some((p: any) => p.thought === true);
+      hasReasoning = Boolean((typeof thoughtsTokenCount === 'number' && thoughtsTokenCount > 0) || hasExplicitThoughtPart);
     } catch {
       // ignore json parse error in ping
     }
@@ -131,6 +131,119 @@ export async function pingModel(
   } catch (err: any) {
     return { ok: false, latencyMs: Date.now() - start, error: err.message || String(err) };
   }
+}
+
+/**
+ * Parses numeric generation from model identifier.
+ * Examples:
+ *  "gemini-4-hydrogen" -> 4.0
+ *  "gemini-3.8-flash" -> 3.8
+ *  "gemini-3.6-flash" -> 3.6
+ *  "gemini-3.5-flash-lite" -> 3.5
+ *  "gemini-3-flash-preview" -> 3.0
+ *  "gemini-2.5-flash" -> 2.5
+ *  "gemini-flash-latest" -> 3.0
+ */
+export function parseGenerationNumber(modelName: string): number {
+  const clean = modelName.toLowerCase();
+  const match = clean.match(/gemini-(\d+(?:\.\d+)?)/);
+  if (match) {
+    const num = parseFloat(match[1]);
+    if (!isNaN(num)) return num;
+  }
+  if (clean.includes('latest')) return 3.0;
+  return 2.0;
+}
+
+/**
+ * Determines whether a model is an eligible text/vision/audio candidate for Gemini Autopilot,
+ * eliminating service models (pure TTS, embeddings, robotics, pure image generators).
+ */
+export function isEligibleGeminiModel(m: GoogleModelInfo): { eligible: boolean; reason?: string } {
+  const name = m.name.toLowerCase();
+  const desc = (m.description || '').toLowerCase();
+  const disp = (m.displayName || '').toLowerCase();
+
+  // 1. Must support generateContent
+  if (!m.supportedGenerationMethods || !m.supportedGenerationMethods.includes('generateContent')) {
+    return { eligible: false, reason: 'Не поддерживает метод generateContent' };
+  }
+
+  // 2. Must belong to the Gemini family
+  if (!name.startsWith('gemini') && !name.includes('gemini')) {
+    return { eligible: false, reason: 'Не принадлежит семейству Gemini' };
+  }
+
+  // 3. Exclude pure speech synthesis (TTS)
+  if (name.includes('-tts') || desc.includes('preview tts') || disp.includes('tts')) {
+    return { eligible: false, reason: 'Служебная модель синтеза речи (TTS)' };
+  }
+
+  // 4. Exclude embeddings
+  if (name.includes('embedding') || desc.includes('embedding')) {
+    return { eligible: false, reason: 'Модель векторных эмбеддингов' };
+  }
+
+  // 5. Exclude robotics
+  if (name.includes('robotics') || desc.includes('robotics')) {
+    return { eligible: false, reason: 'Служебная модель robotics' };
+  }
+
+  // 6. Exclude pure image generation
+  if (
+    name.includes('-image') ||
+    name.includes('image-preview') ||
+    name.includes('nano-banana') ||
+    disp.includes('banana')
+  ) {
+    return { eligible: false, reason: 'Модель генерации изображений' };
+  }
+
+  // 7. Exclude computer-use / desktop automation
+  if (name.includes('computer-use') || desc.includes('computer use')) {
+    return { eligible: false, reason: 'Специализированная модель Computer Use' };
+  }
+
+  // 8. Exclude custom tools preview
+  if (name.includes('customtools')) {
+    return { eligible: false, reason: 'Специализированная preview-модель custom tools' };
+  }
+
+  return { eligible: true };
+}
+
+/**
+ * Detects whether model supports deep reasoning / thinking.
+ */
+export function detectReasoningCapability(
+  m: GoogleModelInfo,
+  pingResult?: { hasReasoning?: boolean; thoughtsTokenCount?: number }
+): boolean {
+  if (
+    pingResult?.hasReasoning === true ||
+    (typeof pingResult?.thoughtsTokenCount === 'number' && pingResult.thoughtsTokenCount > 0)
+  ) {
+    return true;
+  }
+
+  const name = m.name.toLowerCase();
+  const desc = (m.description || '').toLowerCase();
+  const disp = (m.displayName || '').toLowerCase();
+
+  const keywords = ['hydrogen', 'thinking', 'reasoning', 'thought', 'deep-think'];
+  return keywords.some(k => name.includes(k) || desc.includes(k) || disp.includes(k));
+}
+
+/**
+ * Detects whether model has audio/speech transcription specialization.
+ */
+export function detectAudioCapability(m: GoogleModelInfo): boolean {
+  const name = m.name.toLowerCase();
+  const desc = (m.description || '').toLowerCase();
+  const disp = (m.displayName || '').toLowerCase();
+
+  const keywords = ['transcribe', 'speech', 'audio', 'whisper', 'stt'];
+  return keywords.some(k => name.includes(k) || desc.includes(k) || disp.includes(k));
 }
 
 /**
@@ -192,22 +305,10 @@ export async function checkConfiguredModels(options?: {
   const configuredSet = new Set(configured.map(c => c.model.toLowerCase()));
   const recommendations: string[] = [];
 
-  // Filter Google models dynamically without hardcoding
+  // Filter Google models dynamically using isEligibleGeminiModel without hardcoding
   const eligibleCandidates = googleModels
-    .map(m => m.name)
-    .filter(name => {
-      const lower = name.toLowerCase();
-      return (
-        lower.includes('gemini') &&
-        !lower.includes('-tts') &&
-        !lower.includes('embedding') &&
-        !lower.includes('robotics') &&
-        !lower.includes('-image') &&
-        !lower.includes('banana') &&
-        !lower.includes('computer-use') &&
-        !configuredSet.has(lower)
-      );
-    });
+    .filter(m => isEligibleGeminiModel(m).eligible && !configuredSet.has(m.name.toLowerCase()))
+    .map(m => m.name);
 
   for (const rec of eligibleCandidates) {
     if (shouldPing && key) {

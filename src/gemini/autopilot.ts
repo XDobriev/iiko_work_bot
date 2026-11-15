@@ -1,6 +1,21 @@
 import { config } from '../config.js';
 import { escapeHtml } from '../bot/formatter.js';
-import { fetchGoogleModels, pingModel, GoogleModelInfo } from './model-checker.js';
+import {
+  fetchGoogleModels,
+  pingModel,
+  GoogleModelInfo,
+  isEligibleGeminiModel,
+  parseGenerationNumber,
+  detectReasoningCapability,
+  detectAudioCapability
+} from './model-checker.js';
+
+export {
+  isEligibleGeminiModel,
+  parseGenerationNumber,
+  detectReasoningCapability,
+  detectAudioCapability
+};
 
 export type AutopilotRole = 'photo' | 'voice' | 'complex' | 'general';
 
@@ -34,141 +49,35 @@ export interface AutopilotPlan {
 }
 
 /**
- * Parses numeric generation from model identifier.
- * Examples:
- *  "gemini-4-hydrogen" -> 4.0
- *  "gemini-3.6-flash" -> 3.6
- *  "gemini-3.5-flash-lite" -> 3.5
- *  "gemini-3-flash-preview" -> 3.0
- *  "gemini-2.5-flash" -> 2.5
- *  "gemini-flash-latest" -> 3.0
- */
-export function parseGenerationNumber(modelName: string): number {
-  const clean = modelName.toLowerCase();
-  const match = clean.match(/gemini-(\d+(?:\.\d+)?)/);
-  if (match) {
-    const num = parseFloat(match[1]);
-    if (!isNaN(num)) return num;
-  }
-  if (clean.includes('latest')) return 3.0;
-  return 2.0;
-}
-
-/**
- * Determines whether a model is an eligible text/vision/audio candidate for Gemini Autopilot,
- * eliminating service models (pure TTS, embeddings, robotics, pure image generators).
- */
-export function isEligibleGeminiModel(m: GoogleModelInfo): { eligible: boolean; reason?: string } {
-  const name = m.name.toLowerCase();
-  const desc = (m.description || '').toLowerCase();
-  const disp = (m.displayName || '').toLowerCase();
-
-  // 1. Must support generateContent
-  if (!m.supportedGenerationMethods || !m.supportedGenerationMethods.includes('generateContent')) {
-    return { eligible: false, reason: 'Не поддерживает метод generateContent' };
-  }
-
-  // 2. Must belong to the Gemini family
-  if (!name.startsWith('gemini') && !name.includes('gemini')) {
-    return { eligible: false, reason: 'Не принадлежит семейству Gemini' };
-  }
-
-  // 3. Exclude pure speech synthesis (TTS)
-  if (name.includes('-tts') || desc.includes('preview tts') || disp.includes('tts')) {
-    return { eligible: false, reason: 'Служебная модель синтеза речи (TTS)' };
-  }
-
-  // 4. Exclude embeddings
-  if (name.includes('embedding') || desc.includes('embedding')) {
-    return { eligible: false, reason: 'Модель векторных эмбеддингов' };
-  }
-
-  // 5. Exclude robotics
-  if (name.includes('robotics') || desc.includes('robotics')) {
-    return { eligible: false, reason: 'Служебная модель robotics' };
-  }
-
-  // 6. Exclude pure image generation
-  if (
-    name.includes('-image') ||
-    name.includes('image-preview') ||
-    name.includes('nano-banana') ||
-    disp.includes('banana')
-  ) {
-    return { eligible: false, reason: 'Модель генерации изображений' };
-  }
-
-  // 7. Exclude computer-use / desktop automation
-  if (name.includes('computer-use') || desc.includes('computer use')) {
-    return { eligible: false, reason: 'Специализированная модель Computer Use' };
-  }
-
-  // 8. Exclude custom tools preview
-  if (name.includes('customtools')) {
-    return { eligible: false, reason: 'Специализированная preview-модель custom tools' };
-  }
-
-  return { eligible: true };
-}
-
-/**
- * Detects whether model supports deep reasoning / thinking.
- */
-export function detectReasoningCapability(
-  m: GoogleModelInfo,
-  pingResult?: { hasReasoning?: boolean; thoughtsTokenCount?: number }
-): boolean {
-  if (pingResult?.hasReasoning || (pingResult?.thoughtsTokenCount && pingResult.thoughtsTokenCount > 0)) {
-    return true;
-  }
-
-  const name = m.name.toLowerCase();
-  const desc = (m.description || '').toLowerCase();
-  const disp = (m.displayName || '').toLowerCase();
-
-  const keywords = ['hydrogen', 'thinking', 'reasoning', 'thought', 'deep-think'];
-  return keywords.some(k => name.includes(k) || desc.includes(k) || disp.includes(k));
-}
-
-/**
- * Detects whether model has audio/speech transcription specialization.
- */
-export function detectAudioCapability(m: GoogleModelInfo): boolean {
-  const name = m.name.toLowerCase();
-  const desc = (m.description || '').toLowerCase();
-  const disp = (m.displayName || '').toLowerCase();
-
-  const keywords = ['transcribe', 'speech', 'audio', 'whisper', 'stt'];
-  return keywords.some(k => name.includes(k) || desc.includes(k) || disp.includes(k));
-}
-
-/**
  * Ranks benchmarked models into an optimal AutopilotPlan.
  */
 export function rankModels(
   benchmarked: BenchmarkedModel[],
-  fallbackConfig = config.gemini
+  fallbackConfig = config.gemini,
+  ttlMs = 30 * 60 * 1000
 ): AutopilotPlan {
   const timestamp = new Date();
-  const expiresAt = new Date(timestamp.getTime() + 30 * 60 * 1000); // 30 min TTL
-
   const passed = benchmarked.filter(b => b.ok);
   const rejected = benchmarked.filter(b => !b.ok);
 
-  // If no models survived live benchmark, fallback safely to .env
+  // If no models survived live benchmark, fallback safely to .env with short recovery TTL (60s)
   if (passed.length === 0) {
+    const fallbackTtlMs = 60 * 1000; // 1 min TTL for quick recovery from network blips
+    const fallbackExpiresAt = new Date(timestamp.getTime() + fallbackTtlMs);
     return {
       photoModels: [...fallbackConfig.photoModels],
       voiceModels: [...fallbackConfig.voiceModels],
       complexModels: [...fallbackConfig.complexModels],
       generalModels: [...fallbackConfig.models],
       benchmarkedAt: timestamp.toISOString(),
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: fallbackExpiresAt.toISOString(),
       models: [],
       rejectedModels: rejected,
       fromFallback: true
     };
   }
+
+  const expiresAt = new Date(timestamp.getTime() + ttlMs);
 
   // Categorize models
   const reasoningModels = passed
@@ -199,6 +108,18 @@ export function rankModels(
       return (a.latencyMs || 0) - (b.latencyMs || 0);
     });
 
+  // Fast low-latency models for general edits & voice reserve (not audio, not reasoning)
+  const fastModels = passed
+    .filter(m => !m.isAudioSpecialized && !m.hasReasoning)
+    .sort((a, b) => {
+      if (b.generation !== a.generation) return b.generation - a.generation;
+      const aIsFlash = a.name.includes('flash') ? 1 : 0;
+      const bIsFlash = b.name.includes('flash') ? 1 : 0;
+      if (bIsFlash !== aIsFlash) return bIsFlash - aIsFlash;
+      return (a.latencyMs || 0) - (b.latencyMs || 0);
+    });
+  const fallbackFastList = fastModels.length > 0 ? fastModels : visionModels;
+
   // Role assignments:
   // Photo (Receipt recognition):
   // 1. Reasoning models get absolute highest priority (handles math, handwritten 1/7, dirty receipts).
@@ -223,17 +144,24 @@ export function rankModels(
 
   // Voice (Audio dictation):
   // 1. Audio-specialized transcribe models.
-  // 2. Fast multimodal vision models in reserve.
+  // 2. Fast low-latency models in reserve.
   const voiceCandidates: string[] = [];
   for (const am of audioModels) {
     if (!voiceCandidates.includes(am.name)) voiceCandidates.push(am.name);
   }
-  for (const vm of visionModels) {
-    if (!voiceCandidates.includes(vm.name)) voiceCandidates.push(vm.name);
+  for (const fm of fallbackFastList) {
+    if (!voiceCandidates.includes(fm.name)) voiceCandidates.push(fm.name);
   }
 
   // General (free-text edits):
-  const generalCandidates: string[] = visionModels.map(m => m.name);
+  // Fast low-latency models first.
+  const generalCandidates: string[] = [];
+  for (const fm of fallbackFastList) {
+    if (!generalCandidates.includes(fm.name)) generalCandidates.push(fm.name);
+  }
+  for (const vm of visionModels) {
+    if (!generalCandidates.includes(vm.name)) generalCandidates.push(vm.name);
+  }
   if (generalCandidates.length === 0 && passed.length > 0) {
     generalCandidates.push(passed[0].name);
   }
@@ -290,11 +218,22 @@ export class GeminiAutopilot {
     this.ttlMs = ttlMs;
   }
 
-  public static getInstance(apiKey?: string): GeminiAutopilot {
+  public static getInstance(apiKey?: string, ttlMs?: number): GeminiAutopilot {
     if (!GeminiAutopilot.instance) {
-      GeminiAutopilot.instance = new GeminiAutopilot(apiKey);
+      GeminiAutopilot.instance = new GeminiAutopilot(apiKey, ttlMs);
+    } else {
+      if (apiKey && GeminiAutopilot.instance.apiKey !== apiKey) {
+        GeminiAutopilot.instance.apiKey = apiKey;
+      }
+      if (ttlMs !== undefined) {
+        GeminiAutopilot.instance.ttlMs = ttlMs;
+      }
     }
     return GeminiAutopilot.instance;
+  }
+
+  public static resetInstance(): void {
+    GeminiAutopilot.instance = undefined as any;
   }
 
   public getPlan(): AutopilotPlan {
@@ -356,106 +295,118 @@ export class GeminiAutopilot {
     const key = this.apiKey || config.gemini.apiKey;
     if (!key) {
       console.warn('[Autopilot] GEMINI_API_KEY не задан, используется резервная конфигурация.');
-      this.currentPlan = rankModels([], config.gemini);
+      this.currentPlan = rankModels([], config.gemini, this.ttlMs);
       return this.currentPlan;
     }
 
     console.log('[Autopilot] 🚀 Запуск динамического автопилота Gemini...');
-    let rawModels: GoogleModelInfo[] = [];
-
     try {
-      rawModels = await fetchGoogleModels(key);
-    } catch (err: any) {
-      console.warn(`[Autopilot] Не удалось запросить список моделей Google API (${err.message}). Используется fallback.`);
-      this.currentPlan = rankModels([], config.gemini);
-      return this.currentPlan;
-    }
+      let rawModels: GoogleModelInfo[] = [];
+      try {
+        rawModels = await fetchGoogleModels(key);
+      } catch (err: any) {
+        console.warn(`[Autopilot] Не удалось запросить список моделей Google API (${err.message}). Используется fallback.`);
+        this.currentPlan = rankModels([], config.gemini, this.ttlMs);
+        return this.currentPlan;
+      }
 
-    // 1. Smart filtering of eligible models
-    const eligibleModels: GoogleModelInfo[] = [];
-    const preFilteredRejected: BenchmarkedModel[] = [];
+      // 1. Smart filtering of eligible models
+      const eligibleModels: GoogleModelInfo[] = [];
+      const preFilteredRejected: BenchmarkedModel[] = [];
 
-    for (const m of rawModels) {
-      const eligibility = isEligibleGeminiModel(m);
-      if (eligibility.eligible) {
-        eligibleModels.push(m);
-      } else if (m.name.toLowerCase().includes('gemini')) {
-        preFilteredRejected.push({
+      for (const m of rawModels) {
+        const eligibility = isEligibleGeminiModel(m);
+        if (eligibility.eligible) {
+          eligibleModels.push(m);
+        } else if (m.name.toLowerCase().includes('gemini')) {
+          preFilteredRejected.push({
+            name: m.name,
+            displayName: m.displayName || m.name,
+            ok: false,
+            generation: parseGenerationNumber(m.name),
+            tier: 'rejected',
+            hasReasoning: false,
+            isAudioSpecialized: false,
+            rejectionReason: eligibility.reason || 'Исключена из-за нецелевого назначения'
+          });
+        }
+      }
+
+      console.log(`[Autopilot] Обнаружено ${rawModels.length} моделей в Google API. Отобрано кандидатов: ${eligibleModels.length}.`);
+
+      // Sort candidates so newest generations (4.x, 3.x) and transcribe are tested first
+      eligibleModels.sort((a, b) => {
+        const genA = parseGenerationNumber(a.name);
+        const genB = parseGenerationNumber(b.name);
+        return genB - genA;
+      });
+
+      // 2. Automated benchmark with concurrency 4
+      const benchmarkResults = await mapConcurrent(eligibleModels, 4, async m => {
+        const ping = await pingModel(m.name, key);
+        const generation = parseGenerationNumber(m.name);
+        const hasReasoning = detectReasoningCapability(m, ping);
+        const isAudio = detectAudioCapability(m);
+
+        let tier: ModelTier = 'fast-vision';
+        let rejectionReason: string | undefined = undefined;
+
+        if (!ping.ok) {
+          tier = 'rejected';
+          const errLower = (ping.error || '').toLowerCase();
+          if (errLower.includes('404')) {
+            rejectionReason = '404 Модель недоступна/снята';
+          } else if (errLower.includes('429')) {
+            rejectionReason = '429 Превышена квота (Quota exceeded)';
+          } else if (errLower.includes('503') || errLower.includes('500')) {
+            rejectionReason = '503 Временная перегрузка сервиса';
+          } else if (
+            errLower.includes('timeout') ||
+            errLower.includes('abort') ||
+            (ping.latencyMs || 0) >= 15000
+          ) {
+            rejectionReason = 'Таймаут отклика (>15с)';
+          } else {
+            rejectionReason = ping.error || 'Ошибка отклика';
+          }
+        } else if (isAudio) {
+          tier = 'audio';
+        } else if (hasReasoning) {
+          tier = 'reasoning';
+        } else {
+          tier = 'fast-vision';
+        }
+
+        const res: BenchmarkedModel = {
           name: m.name,
           displayName: m.displayName || m.name,
-          ok: false,
-          generation: parseGenerationNumber(m.name),
-          tier: 'rejected',
-          hasReasoning: false,
-          isAudioSpecialized: false,
-          rejectionReason: eligibility.reason || 'Исключена из-за нецелевого назначения'
-        });
-      }
+          ok: ping.ok,
+          latencyMs: ping.latencyMs,
+          error: ping.error,
+          hasReasoning,
+          isAudioSpecialized: isAudio,
+          generation,
+          tier,
+          rejectionReason
+        };
+
+        return res;
+      });
+
+      const allBenchmarked = [...benchmarkResults, ...preFilteredRejected];
+      this.currentPlan = rankModels(allBenchmarked, config.gemini, this.ttlMs);
+
+      console.log(`[Autopilot] ✅ Бенчмарк завершен. Активные модели:`);
+      console.log(`  📸 Фото: ${this.currentPlan.photoModels.join(' -> ')}`);
+      console.log(`  🎙 Голос: ${this.currentPlan.voiceModels.join(' -> ')}`);
+      console.log(`  ⚡️ Эскалация: ${this.currentPlan.complexModels.join(' -> ')}`);
+
+      return this.currentPlan;
+    } catch (err: any) {
+      console.warn(`[Autopilot] Непредвиденная ошибка автопилота (${err.message}). Используется fallback.`);
+      this.currentPlan = rankModels([], config.gemini, this.ttlMs);
+      return this.currentPlan;
     }
-
-    console.log(`[Autopilot] Обнаружено ${rawModels.length} моделей в Google API. Отобрано кандидатов: ${eligibleModels.length}.`);
-
-    // Sort candidates so newest generations (4.x, 3.x) and transcribe are tested first
-    eligibleModels.sort((a, b) => {
-      const genA = parseGenerationNumber(a.name);
-      const genB = parseGenerationNumber(b.name);
-      return genB - genA;
-    });
-
-    // 2. Automated benchmark with concurrency 4
-    const benchmarkResults = await mapConcurrent(eligibleModels, 4, async m => {
-      const ping = await pingModel(m.name, key);
-      const generation = parseGenerationNumber(m.name);
-      const hasReasoning = detectReasoningCapability(m, ping);
-      const isAudio = detectAudioCapability(m);
-
-      let tier: ModelTier = 'fast-vision';
-      let rejectionReason: string | undefined = undefined;
-
-      if (!ping.ok) {
-        tier = 'rejected';
-        if (ping.error?.includes('404')) {
-          rejectionReason = '404 Модель недоступна/снята';
-        } else if (ping.error?.includes('429')) {
-          rejectionReason = '429 Превышена квота (Quota exceeded)';
-        } else if (ping.error?.includes('503') || ping.error?.includes('500')) {
-          rejectionReason = '503 Временная перегрузка сервиса';
-        } else if (ping.error?.includes('timeout') || ping.error?.includes('aborted') || (ping.latencyMs || 0) >= 12000) {
-          rejectionReason = 'Таймаут отклика (>12с)';
-        } else {
-          rejectionReason = ping.error || 'Ошибка отклика';
-        }
-      } else if (hasReasoning) {
-        tier = 'reasoning';
-      } else if (isAudio) {
-        tier = 'audio';
-      }
-
-      const res: BenchmarkedModel = {
-        name: m.name,
-        displayName: m.displayName || m.name,
-        ok: ping.ok,
-        latencyMs: ping.latencyMs,
-        error: ping.error,
-        hasReasoning,
-        isAudioSpecialized: isAudio,
-        generation,
-        tier,
-        rejectionReason
-      };
-
-      return res;
-    });
-
-    const allBenchmarked = [...benchmarkResults, ...preFilteredRejected];
-    this.currentPlan = rankModels(allBenchmarked, config.gemini);
-
-    console.log(`[Autopilot] ✅ Бенчмарк завершен. Активные модели:`);
-    console.log(`  📸 Фото: ${this.currentPlan.photoModels.join(' -> ')}`);
-    console.log(`  🎙 Голос: ${this.currentPlan.voiceModels.join(' -> ')}`);
-    console.log(`  ⚡️ Эскалация: ${this.currentPlan.complexModels.join(' -> ')}`);
-
-    return this.currentPlan;
   }
 }
 
