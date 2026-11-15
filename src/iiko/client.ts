@@ -196,6 +196,13 @@ export class IikoClient {
     return bestScore >= 0.5 ? best : undefined;
   }
 
+  /**
+   * Alias for findEntityByName (for backward compatibility and test contracts).
+   */
+  findByName<T extends { name: string }>(list: T[], rawName: string): T | undefined {
+    return this.findEntityByName(list, rawName);
+  }
+
   private parseDate(date?: string): string {
     const m = (date || '').match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
     const iso = m

@@ -67,7 +67,7 @@ test('InvoicesRepository enhanced duplicate detection handles identical vs disti
     ],
     total_written: 4700
   };
-  repo.saveInvoice(invoice1);
+  const { invoiceId: savedId } = repo.saveInvoice(invoice1);
 
   // 1. Same supplier, same date, identical total and composition -> DUPLICATE!
   const dupCheck1 = repo.checkDuplicate(invoice1);
@@ -128,6 +128,10 @@ test('InvoicesRepository enhanced duplicate detection handles identical vs disti
   };
   const dupCheck5 = repo.checkDuplicate(lowercaseSupplierInvoice);
   assert.strictEqual(dupCheck5.isDuplicate, true, 'Different casing of supplier name must still detect duplicate');
+
+  // 6. Self-exclusion during edit: invoice must NOT be flagged as duplicate of itself
+  const selfCheck = repo.checkDuplicate(invoice1, 'beyni', savedId);
+  assert.strictEqual(selfCheck.isDuplicate, false, 'Invoice being edited must not match itself as a duplicate');
 });
 
 test('InvoicesRepository persists and retrieves product mappings', () => {

@@ -8,48 +8,8 @@ import { startWebAppServer } from '../src/webapp/server.js';
 import { InvoiceData } from '../src/types/index.js';
 
 test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
-  // Use in-memory SQLite database for pure isolated testing
-  const memDb = new DatabaseSync(':memory:');
-  memDb.exec(`
-    CREATE TABLE invoices (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      restaurant_id TEXT DEFAULT 'beyni',
-      date TEXT,
-      supplier TEXT,
-      warehouse TEXT DEFAULT 'kitchen',
-      total_calculated REAL NOT NULL DEFAULT 0,
-      total_written REAL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      iiko_document_id TEXT,
-      telegram_user_id INTEGER,
-      telegram_message_id INTEGER,
-      photo_file_id TEXT,
-      local_photo_path TEXT,
-      raw_json TEXT,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-
-    CREATE TABLE invoice_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
-      name TEXT NOT NULL,
-      normalized_name TEXT NOT NULL,
-      qty REAL NOT NULL DEFAULT 0,
-      price REAL NOT NULL DEFAULT 0,
-      sum REAL NOT NULL DEFAULT 0,
-      unit TEXT,
-      created_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-
-    CREATE TABLE product_mappings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      raw_name TEXT NOT NULL UNIQUE,
-      normalized_name TEXT NOT NULL,
-      iiko_product_name TEXT NOT NULL,
-      iiko_product_id TEXT,
-      updated_at TEXT DEFAULT (datetime('now', 'localtime'))
-    );
-  `);
+  // Use in-memory SQLite database initialized with full schema
+  const memDb = getDatabase(':memory:');
 
   const repo = new InvoicesRepository(memDb);
   const workflow = new InvoiceWorkflow({ repo });
@@ -68,9 +28,17 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
 
   const { invoiceId } = repo.saveInvoice(initialData);
 
-  // Start webapp on random free port
+  // Start webapp on random free port with onInvoiceUpdated callback
   const TEST_PORT = 39485;
-  const webapp = startWebAppServer(workflow, TEST_PORT);
+  let updatedInvoiceIdFromCallback: number | null = null;
+  let callbackCardText: string | null = null;
+
+  const webapp = startWebAppServer(workflow, TEST_PORT, {
+    onInvoiceUpdated: (invId, cardText) => {
+      updatedInvoiceIdFromCallback = invId;
+      callbackCardText = cardText;
+    }
+  });
 
   try {
     const baseUrl = `http://localhost:${TEST_PORT}`;
@@ -92,16 +60,33 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
     const htmlText = await htmlRes.text();
     assert.ok(htmlText.includes('telegram-web-app.js'), 'HTML should contain telegram-web-app script');
     assert.ok(htmlText.includes('Редактор накладной'), 'HTML should contain editor title');
+    assert.ok(htmlText.includes('disableVerticalSwipes'), 'HTML should configure disableVerticalSwipes');
+    assert.ok(htmlText.includes('iiko-matcher-box'), 'HTML should contain iiko matcher UI box');
 
-    // 4. GET /api/invoice/:id
+    // 4. GET /api/invoice/latest
+    const latestRes = await fetch(`${baseUrl}/api/invoice/latest`);
+    assert.equal(latestRes.status, 200);
+    const latestJson = await latestRes.json() as { success: boolean; invoiceId: number; data: InvoiceData };
+    assert.equal(latestJson.success, true);
+    assert.equal(latestJson.invoiceId, invoiceId);
+
+    // 5. GET /api/invoices/recent
+    const recentRes = await fetch(`${baseUrl}/api/invoices/recent`);
+    assert.equal(recentRes.status, 200);
+    const recentJson = await recentRes.json() as { success: boolean; invoices: Array<{ id: number }> };
+    assert.equal(recentJson.success, true);
+    assert.ok(recentJson.invoices.some(inv => inv.id === invoiceId));
+
+    // 6. GET /api/invoice/:id
     const invRes = await fetch(`${baseUrl}/api/invoice/${invoiceId}`);
     assert.equal(invRes.status, 200);
-    const invJson = await invRes.json() as { success: boolean; data: InvoiceData; knownItems: string[] };
+    const invJson = await invRes.json() as { success: boolean; data: InvoiceData; knownItems: string[]; recentInvoices: Array<{ id: number }> };
     assert.equal(invJson.success, true);
     assert.equal(invJson.data.supplier, 'ООО Мясокомбинат');
     assert.equal(invJson.data.items.length, 2);
+    assert.ok(Array.isArray(invJson.recentInvoices));
 
-    // 5. POST /api/invoice/:id (Edit via WebApp)
+    // 7. POST /api/invoice/:id (Edit via WebApp)
     const updatedData: InvoiceData = {
       date: '14.11.2026',
       supplier: 'ООО Мясокомбинат Люкс',
@@ -130,6 +115,10 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
     assert.equal(editJson.data.warehouse, 'household');
     assert.equal(editJson.data.items.length, 2);
 
+    // Verify onInvoiceUpdated callback was fired!
+    assert.equal(updatedInvoiceIdFromCallback, invoiceId);
+    assert.ok(callbackCardText && callbackCardText.includes('Хоз склад'));
+
     // Verify persisted in SQLite
     const verifyDomain = repo.getInvoice(invoiceId);
     assert.ok(verifyDomain);
@@ -142,14 +131,14 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
     assert.ok(mapping);
     assert.equal(mapping.iikoProductName, 'Говядина (вырезка охл)');
 
-    // 6. GET /api/products
+    // 8. GET /api/products
     const prodRes = await fetch(`${baseUrl}/api/products`);
     assert.equal(prodRes.status, 200);
     const prodJson = await prodRes.json() as { success: boolean; mappings: Array<{ raw_name: string }> };
     assert.equal(prodJson.success, true);
     assert.ok(prodJson.mappings.some(m => m.raw_name === 'Говядина вырезка'));
 
-    // 7. POST /api/mapping
+    // 9. POST /api/mapping
     const mapRes = await fetch(`${baseUrl}/api/mapping`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

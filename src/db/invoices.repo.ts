@@ -24,7 +24,9 @@ export function normalizeName(name: string): string {
 
 export interface SaveInvoiceMeta {
   userId?: number;
+  chatId?: number;
   messageId?: number;
+  cardMessageId?: number;
   photoFileId?: string;
   localPhotoPath?: string;
   restaurantId?: string;
@@ -63,8 +65,8 @@ export class InvoicesRepository {
     const insertInvoice = this.db.prepare(`
       INSERT INTO invoices (
         restaurant_id, date, supplier, warehouse, total_calculated, total_written,
-        status, telegram_user_id, telegram_message_id, photo_file_id, local_photo_path, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+        status, telegram_user_id, telegram_chat_id, telegram_message_id, card_message_id, photo_file_id, local_photo_path, raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = insertInvoice.run(
@@ -75,7 +77,9 @@ export class InvoicesRepository {
       totalCalculated,
       data.total_written ?? null,
       meta?.userId ?? null,
+      meta?.chatId ?? null,
       meta?.messageId ?? null,
+      meta?.cardMessageId ?? null,
       meta?.photoFileId ?? null,
       meta?.localPhotoPath ?? null,
       JSON.stringify(data)
@@ -207,6 +211,37 @@ export class InvoicesRepository {
     return res.changes > 0;
   }
 
+  updateInvoiceTelegramMessage(id: number, chatId: number, cardMessageId: number): boolean {
+    const stmt = this.db.prepare(`
+      UPDATE invoices
+      SET telegram_chat_id = ?, card_message_id = ?
+      WHERE id = ?
+    `);
+    const res = stmt.run(chatId, cardMessageId, id);
+    return res.changes > 0;
+  }
+
+  getLatestInvoice(status?: InvoiceStatus): InvoiceDomainRecord | null {
+    let row: { id: number } | undefined;
+    if (status) {
+      row = this.db.prepare('SELECT id FROM invoices WHERE status = ? ORDER BY id DESC LIMIT 1').get(status) as { id: number } | undefined;
+    } else {
+      row = this.db.prepare('SELECT id FROM invoices ORDER BY id DESC LIMIT 1').get() as { id: number } | undefined;
+    }
+    if (!row) return null;
+    return this.getInvoice(row.id);
+  }
+
+  getRecentInvoicesWithData(limit = 10): Array<{ id: number; date: string; supplier: string; total: number; status: InvoiceStatus }> {
+    const rows = this.db.prepare(`
+      SELECT id, date, supplier, total_calculated as total, status
+      FROM invoices
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(limit) as Array<{ id: number; date: string; supplier: string; total: number; status: InvoiceStatus }>;
+    return rows;
+  }
+
   updateLocalPhotoPath(id: number, photoPath: string): boolean {
     const stmt = this.db.prepare('UPDATE invoices SET local_photo_path = ? WHERE id = ?');
     const res = stmt.run(photoPath, id);
@@ -226,8 +261,13 @@ export class InvoicesRepository {
   /**
    * Enhanced duplicate detection: checks if an invoice with same supplier and date exists,
    * comparing item composition and totals to distinguish separate deliveries from actual duplicates.
+   * If excludeInvoiceId is provided (e.g. during edit/toggle of an existing invoice), that invoice is excluded.
    */
-  checkDuplicate(data: InvoiceData, restaurantId = 'beyni'): { isDuplicate: boolean; duplicateInvoiceId?: number; duplicateDate?: string } {
+  checkDuplicate(
+    data: InvoiceData,
+    restaurantId = 'beyni',
+    excludeInvoiceId?: number
+  ): { isDuplicate: boolean; duplicateInvoiceId?: number; duplicateDate?: string } {
     if (!data.supplier || data.supplier === 'Не указан') {
       return { isDuplicate: false };
     }
@@ -240,10 +280,11 @@ export class InvoicesRepository {
       SELECT id, supplier, date, total_calculated, total_written
       FROM invoices
       WHERE restaurant_id = ? AND status != 'rejected'
+        AND (? IS NULL OR id != ?)
       ORDER BY id DESC LIMIT 50
     `);
 
-    const allCandidates = stmt.all(restaurantId) as Array<{
+    const allCandidates = stmt.all(restaurantId, excludeInvoiceId ?? null, excludeInvoiceId ?? null) as Array<{
       id: number;
       supplier: string;
       date: string;
@@ -330,9 +371,14 @@ export class InvoicesRepository {
 
   /**
    * Compares each item with previous prices in history and detects unit/packaging anomalies.
+   * If excludeInvoiceId is provided, that invoice is ignored so self-comparison during editing is avoided.
    */
-  compareWithHistory(data: InvoiceData, restaurantId = 'beyni'): HistoricalComparison {
-    const dup = this.checkDuplicate(data, restaurantId);
+  compareWithHistory(
+    data: InvoiceData,
+    restaurantId = 'beyni',
+    excludeInvoiceId?: number
+  ): HistoricalComparison {
+    const dup = this.checkDuplicate(data, restaurantId, excludeInvoiceId);
     const priceComparisons: PriceComparisonItem[] = [];
     let totalPriceDelta = 0;
     let totalCalculated = 0;
@@ -342,6 +388,7 @@ export class InvoicesRepository {
       FROM invoice_items ii
       JOIN invoices i ON ii.invoice_id = i.id
       WHERE ii.normalized_name = ? AND i.restaurant_id = ? AND i.status != 'rejected'
+        AND (? IS NULL OR i.id != ?)
       ORDER BY i.id DESC LIMIT 1
     `);
 
@@ -350,7 +397,12 @@ export class InvoicesRepository {
       totalCalculated += sum;
       const normName = normalizeName(item.name);
 
-      const prev = findPriceStmt.get(normName, restaurantId) as
+      const prev = findPriceStmt.get(
+        normName,
+        restaurantId,
+        excludeInvoiceId ?? null,
+        excludeInvoiceId ?? null
+      ) as
         | { price: number; unit?: string; date: string; supplier: string }
         | undefined;
 

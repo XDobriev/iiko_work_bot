@@ -44,6 +44,35 @@ export function createEditKeyboard(invoiceId: number): InlineKeyboard {
     .text('🔙 Завершить', `finish_edit:${invoiceId}`);
 }
 
+export async function updateTelegramInvoiceCard(
+  bot: Bot,
+  workflow: InvoiceWorkflow,
+  invoiceId: number,
+  cardText?: string,
+  hasPhoto?: boolean
+): Promise<boolean> {
+  const card = workflow.getInvoiceCard(invoiceId);
+  if (!card) return false;
+
+  const chatId = card.domain.invoice.telegram_chat_id;
+  const messageId = card.domain.invoice.card_message_id;
+  const text = cardText || card.cardText;
+  const photo = hasPhoto !== undefined ? hasPhoto : card.hasPhoto;
+
+  if (chatId && messageId) {
+    try {
+      await bot.api.editMessageText(chatId, messageId, text, {
+        parse_mode: 'HTML',
+        reply_markup: createInvoiceKeyboard(invoiceId, photo)
+      });
+      return true;
+    } catch (err) {
+      console.warn(`[Bot] Не удалось обновить сообщение ${messageId} в чате ${chatId}:`, err);
+    }
+  }
+  return false;
+}
+
 async function safeReact(ctx: Context, emoji: string): Promise<void> {
   try {
     await ctx.react(emoji as any);
@@ -109,7 +138,16 @@ async function handleViewPhoto(ctx: Context, workflow: InvoiceWorkflow, invoiceI
   await ctx.answerCallbackQuery({ text: 'Фото для этой накладной не найдено' });
 }
 
-async function handleConfirm(ctx: Context, workflow: InvoiceWorkflow, invoiceId: number): Promise<void> {
+async function handleConfirm(
+  ctx: Context,
+  workflow: InvoiceWorkflow,
+  invoiceId: number,
+  sessions: Map<number, EditSession>
+): Promise<void> {
+  const userId = ctx.from?.id || 0;
+  sessions.delete(userId);
+  workflow.deleteEditSession(userId);
+
   const card = workflow.getInvoiceCard(invoiceId);
   if (!card) {
     await ctx.answerCallbackQuery({ text: 'Накладная не найдена' });
@@ -508,10 +546,11 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
       await safeReact(ctx, '⚡');
-      await ctx.reply(result.cardText, {
+      const sentMsg = await ctx.reply(result.cardText, {
         parse_mode: 'HTML',
         reply_markup: keyboard
       });
+      workflow.updateInvoiceTelegramMessage(result.invoiceId, ctx.chat.id, sentMsg.message_id);
     } catch (err: any) {
       console.error('Ошибка обработки фото:', err);
       try {
@@ -565,10 +604,11 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
       await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
       await safeReact(ctx, '⚡');
-      await ctx.reply(result.cardText, {
+      const sentMsg = await ctx.reply(result.cardText, {
         parse_mode: 'HTML',
         reply_markup: keyboard
       });
+      workflow.updateInvoiceTelegramMessage(result.invoiceId, ctx.chat.id, sentMsg.message_id);
     } catch (err: any) {
       console.error('Ошибка голосового распознавания:', err);
       try {
@@ -601,7 +641,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       case 'view_photo':
         return handleViewPhoto(ctx, workflow, invoiceId);
       case 'confirm':
-        return handleConfirm(ctx, workflow, invoiceId);
+        return handleConfirm(ctx, workflow, invoiceId, activeEditSessions);
       case 'reject':
         return handleReject(ctx, workflow, invoiceId, activeEditSessions);
       case 'edit':

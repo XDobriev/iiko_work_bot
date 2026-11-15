@@ -163,10 +163,13 @@ test('IikoClient findEntityByName eliminates stop-word false positive matching',
   const falseMatch = client.findEntityByName(suppliers, 'ИП Петров');
   assert.strictEqual(falseMatch, undefined, 'Must not falsely match unrelated entity via conjunction or legal prefix');
 
-  // Valid supplier match
+  // Valid supplier match (via findEntityByName and alias findByName)
   const validMatch = client.findEntityByName(suppliers, 'Мясо и Рыба');
   assert.strictEqual(validMatch?.id, '1');
 
-  const validMatch2 = client.findEntityByName(suppliers, 'Иванов Сергей');
+  const validMatchAlias = client.findByName(suppliers, 'Мясо и Рыба');
+  assert.strictEqual(validMatchAlias?.id, '1');
+
+  const validMatch2 = client.findByName(suppliers, 'Иванов Сергей');
   assert.strictEqual(validMatch2?.id, '2');
 });

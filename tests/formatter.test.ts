@@ -65,7 +65,7 @@ test('formatInvoiceMessage formats header, table, and duplicate alert', () => {
   assert.match(msg, /🔺 <b>Говядина мякоть<\/b>: <b>600 ₽\/кг<\/b> \(\+50 ₽ \/ \+9\.1% к 01\.11\.2026\)/);
 });
 
-test('formatInvoiceMessage uses expandable blockquote for large invoices and detects math discrepancy', () => {
+test('formatInvoiceMessage formats large invoices cleanly and detects math discrepancy', () => {
   const data: InvoiceData = {
     date: '16.11.2026',
     supplier: 'ХозСнаб',
@@ -89,7 +89,8 @@ test('formatInvoiceMessage uses expandable blockquote for large invoices and det
 
   const msg = formatInvoiceMessage(102, data, comparison);
   assert.match(msg, /Хоз склад/);
-  assert.match(msg, /<blockquote expandable><pre>/);
+  assert.match(msg, /<pre>#  Наименование/);
+  assert.match(msg, /ИТОГО:\s*1840/);
   assert.match(msg, /⚠️ <b>Расхождение в сумме!<\/b>/);
   assert.match(msg, /разница: 340 ₽/);
 });

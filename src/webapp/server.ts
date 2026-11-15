@@ -30,7 +30,15 @@ function resolveHtmlPath(): string | null {
   return null;
 }
 
-export function startWebAppServer(workflow: InvoiceWorkflow, port = 3000): WebAppServerInstance {
+export interface WebAppServerOptions {
+  onInvoiceUpdated?: (invoiceId: number, cardText: string, hasPhoto: boolean) => Promise<void> | void;
+}
+
+export function startWebAppServer(
+  workflow: InvoiceWorkflow,
+  port = 3000,
+  options?: WebAppServerOptions
+): WebAppServerInstance {
   const htmlPath = resolveHtmlPath();
 
   const server = http.createServer(async (req, res) => {
@@ -67,7 +75,53 @@ export function startWebAppServer(workflow: InvoiceWorkflow, port = 3000): WebAp
       return;
     }
 
-    // 3. GET /api/invoice/:id
+    const repo = workflow.getRepo();
+
+    // 3. GET /api/invoice/latest
+    if (pathname === '/api/invoice/latest' && req.method === 'GET') {
+      const latestDomain = workflow.getLatestInvoice('pending') || workflow.getLatestInvoice();
+      if (!latestDomain) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: 'В базе пока нет накладных' }));
+        return;
+      }
+
+      const invoiceId = latestDomain.invoice.id;
+      const card = workflow.getInvoiceCard(invoiceId);
+      if (!card) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, message: 'Накладная не найдена' }));
+        return;
+      }
+
+      const knownItems = repo.getKnownItems(80);
+      const suppliers = repo.getKnownSuppliers(40);
+      const mappings = repo.getAllProductMappings();
+      const recentInvoices = workflow.getRecentInvoicesWithData(15);
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        invoiceId,
+        data: card.domain.data,
+        comparison: card.comparison,
+        knownItems,
+        suppliers,
+        mappings,
+        recentInvoices
+      }));
+      return;
+    }
+
+    // 4. GET /api/invoices/recent
+    if (pathname === '/api/invoices/recent' && req.method === 'GET') {
+      const recentInvoices = workflow.getRecentInvoicesWithData(20);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, invoices: recentInvoices }));
+      return;
+    }
+
+    // 5. GET /api/invoice/:id
     const invoiceMatch = pathname.match(/^\/api\/invoice\/(\d+)$/);
     if (invoiceMatch && req.method === 'GET') {
       const invoiceId = parseInt(invoiceMatch[1], 10);
@@ -78,10 +132,10 @@ export function startWebAppServer(workflow: InvoiceWorkflow, port = 3000): WebAp
         return;
       }
 
-      const repo = workflow.getRepo();
       const knownItems = repo.getKnownItems(80);
       const suppliers = repo.getKnownSuppliers(40);
       const mappings = repo.getAllProductMappings();
+      const recentInvoices = workflow.getRecentInvoicesWithData(15);
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
@@ -91,12 +145,13 @@ export function startWebAppServer(workflow: InvoiceWorkflow, port = 3000): WebAp
         comparison: card.comparison,
         knownItems,
         suppliers,
-        mappings
+        mappings,
+        recentInvoices
       }));
       return;
     }
 
-    // 4. POST /api/invoice/:id
+    // 6. POST /api/invoice/:id
     if (invoiceMatch && req.method === 'POST') {
       const invoiceId = parseInt(invoiceMatch[1], 10);
       try {
@@ -128,6 +183,15 @@ export function startWebAppServer(workflow: InvoiceWorkflow, port = 3000): WebAp
             if (m.rawName && m.iikoProductName) {
               workflow.saveProductMapping(m.rawName, m.iikoProductName, m.iikoProductId);
             }
+          }
+        }
+
+        // Trigger bot card update if registered
+        if (options?.onInvoiceUpdated) {
+          try {
+            await options.onInvoiceUpdated(invoiceId, editRes.cardText || '', !!editRes.hasPhoto);
+          } catch (updateErr) {
+            console.warn('[WebApp] Ошибка при обновлении карточки в Telegram:', updateErr);
           }
         }
 

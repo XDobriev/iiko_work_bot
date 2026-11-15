@@ -39,7 +39,9 @@ export function getDatabase(customPath?: string): DatabaseSync {
       status TEXT NOT NULL DEFAULT 'pending', -- pending, confirmed, rejected, synced
       iiko_document_id TEXT,
       telegram_user_id INTEGER,
+      telegram_chat_id INTEGER,
       telegram_message_id INTEGER,
+      card_message_id INTEGER,
       photo_file_id TEXT,
       local_photo_path TEXT,
       raw_json TEXT,
@@ -57,7 +59,9 @@ export function getDatabase(customPath?: string): DatabaseSync {
     status: "TEXT NOT NULL DEFAULT 'pending'",
     iiko_document_id: "TEXT",
     telegram_user_id: "INTEGER",
+    telegram_chat_id: "INTEGER",
     telegram_message_id: "INTEGER",
+    card_message_id: "INTEGER",
     photo_file_id: "TEXT",
     local_photo_path: "TEXT",
     raw_json: "TEXT"

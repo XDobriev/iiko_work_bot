@@ -82,7 +82,7 @@ export const config: Config = {
     path: path.resolve(process.cwd(), process.env.DATABASE_PATH || './data/invoices.db')
   },
   webapp: {
-    enabled: process.env.WEBAPP_ENABLED !== 'false',
+    enabled: process.env.WEBAPP_ENABLED === 'true',
     port: parseInt(process.env.WEBAPP_PORT || process.env.PORT || '3000', 10) || 3000,
     url: (process.env.WEBAPP_URL || '').replace(/\/+$/, '')
   }

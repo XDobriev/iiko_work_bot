@@ -52,7 +52,9 @@ export interface InvoiceRecord {
   status: InvoiceStatus;
   iiko_document_id?: string | null;
   telegram_user_id?: number | null;
+  telegram_chat_id?: number | null;
   telegram_message_id?: number | null;
+  card_message_id?: number | null;
   photo_file_id?: string | null;
   created_at: string;
 }

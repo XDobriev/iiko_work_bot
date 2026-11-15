@@ -1,0 +1,12 @@
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: 22
+
+build:
+  additionalCommands: npm run build
+
+run:
+  persistenceMount: /data
+  command: npm start

@@ -189,7 +189,7 @@ export class InvoiceWorkflow {
       return { success: false, error: 'Ошибка получения обновленной накладной' };
     }
 
-    const comparison = this.repo.compareWithHistory(updated.data);
+    const comparison = this.repo.compareWithHistory(updated.data, 'beyni', invoiceId);
     const cardText = formatInvoiceMessage(invoiceId, updated.data, comparison);
     const hasPhoto = Boolean(updated.invoice.photo_file_id || updated.invoice.local_photo_path || this.getPhotoPath(invoiceId));
 
@@ -219,7 +219,7 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Не удалось сохранить изменения в базе' };
     }
 
-    const comparison = this.repo.compareWithHistory(parseRes.data);
+    const comparison = this.repo.compareWithHistory(parseRes.data, 'beyni', invoiceId);
     const cardText = formatInvoiceMessage(invoiceId, parseRes.data, comparison);
     const editableText = formatEditableInvoice(parseRes.data);
     const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
@@ -246,7 +246,7 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Не удалось сохранить изменения в базе' };
     }
 
-    const comparison = this.repo.compareWithHistory(data);
+    const comparison = this.repo.compareWithHistory(data, 'beyni', invoiceId);
     const cardText = formatInvoiceMessage(invoiceId, data, comparison);
     const editableText = formatEditableInvoice(data);
     const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
@@ -293,7 +293,7 @@ export class InvoiceWorkflow {
       return { success: false, error: 'Не удалось обновить накладную в базе' };
     }
 
-    const comparison = this.repo.compareWithHistory(updatedData);
+    const comparison = this.repo.compareWithHistory(updatedData, 'beyni', invoiceId);
     const cardText = formatInvoiceMessage(invoiceId, updatedData, comparison);
     const editableText = formatEditableInvoice(updatedData);
     const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
@@ -362,7 +362,7 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) return null;
 
-    const comparison = this.repo.compareWithHistory(domain.data);
+    const comparison = this.repo.compareWithHistory(domain.data, 'beyni', invoiceId);
     const cardText = formatInvoiceMessage(invoiceId, domain.data, comparison);
     const editableText = formatEditableInvoice(domain.data);
     const hasPhoto = Boolean(domain.invoice.photo_file_id || domain.invoice.local_photo_path || this.getPhotoPath(invoiceId));
@@ -408,5 +408,17 @@ export class InvoiceWorkflow {
 
   deleteEditSession(userId: number): boolean {
     return this.repo.deleteEditSession(userId);
+  }
+
+  updateInvoiceTelegramMessage(invoiceId: number, chatId: number, cardMessageId: number): boolean {
+    return this.repo.updateInvoiceTelegramMessage(invoiceId, chatId, cardMessageId);
+  }
+
+  getLatestInvoice(status?: 'pending' | 'confirmed' | 'rejected' | 'synced'): InvoiceDomainRecord | null {
+    return this.repo.getLatestInvoice(status);
+  }
+
+  getRecentInvoicesWithData(limit = 10) {
+    return this.repo.getRecentInvoicesWithData(limit);
   }
 }

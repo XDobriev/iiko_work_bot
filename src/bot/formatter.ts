@@ -59,12 +59,7 @@ export function formatInvoiceMessage(
   tableLines.push('──────────────────────────────────────────────');
   tableLines.push(`               ИТОГО:           ${Math.round(calcTotal).toString().padStart(8, ' ')}`);
 
-  const preTable = `<pre>${escapeHtml(tableLines.join('\n'))}</pre>`;
-  if (data.items.length >= 4) {
-    lines.push(`<blockquote expandable>${preTable}</blockquote>`);
-  } else {
-    lines.push(preTable);
-  }
+  lines.push(`<pre>${escapeHtml(tableLines.join('\n'))}</pre>`);
 
   // Math discrepancy
   if (comparison.mathDiscrepancy && data.total_written != null) {
