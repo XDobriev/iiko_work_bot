@@ -94,6 +94,23 @@ export function detectImageMimeType(buffer: Buffer): string {
   return 'image/jpeg';
 }
 
+/**
+ * Safely extracts non-thought text from candidate parts, ensuring reasoning models'
+ * thought scratchpads are not mistakenly parsed as invoice JSON payloads.
+ */
+export function extractCandidateText(candidate: any): string | undefined {
+  if (!candidate?.content?.parts || !Array.isArray(candidate.content.parts)) {
+    return undefined;
+  }
+  const textParts = candidate.content.parts.filter(
+    (p: any) => !p.thought && typeof p.text === 'string'
+  );
+  if (textParts.length > 0) {
+    return textParts.map((p: any) => p.text).join('\n');
+  }
+  return candidate.content.parts[0]?.text;
+}
+
 export class GeminiInvoiceRecognizer {
   private apiKey: string;
   private hasExplicitModels: boolean = false;
@@ -244,7 +261,7 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
 
           const json = (await response.json()) as any;
           const candidate = json.candidates?.[0];
-          const rawContent = candidate?.content?.parts?.[0]?.text;
+          const rawContent = extractCandidateText(candidate);
 
           if (!rawContent) {
             throw new Error(isVoice ? 'Нейросеть не смогла распознать голос.' : 'Нейросеть вернула пустой ответ.');
@@ -328,7 +345,8 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
           }
 
           const json = (await response.json()) as any;
-          const rawContent = json.candidates?.[0]?.content?.parts?.[0]?.text;
+          const candidate = json.candidates?.[0];
+          const rawContent = extractCandidateText(candidate);
           if (!rawContent) {
             throw new Error('Нейросеть вернула пустой ответ при редактировании.');
           }

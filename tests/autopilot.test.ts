@@ -213,13 +213,13 @@ test('rankModels prioritizes reasoning for photo and complex, audio for voice, a
       name: 'gemini-3.8-flash',
       displayName: 'Gemini 3.8 Flash',
       ok: false,
-      latencyMs: 12000,
+      latencyMs: 15100,
       error: 'TimeoutError',
       hasReasoning: false,
       isAudioSpecialized: false,
       generation: 3.8,
       tier: 'rejected',
-      rejectionReason: 'Таймаут отклика (>12с)'
+      rejectionReason: 'Таймаут отклика (>15с)'
     }
   ];
 
