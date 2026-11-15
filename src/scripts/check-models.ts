@@ -1,21 +1,25 @@
-import { checkConfiguredModels, formatModelReportConsole } from '../gemini/model-checker.js';
+import { GeminiAutopilot, formatAutopilotReportConsole } from '../gemini/autopilot.js';
 
 async function main() {
-  console.log('Запуск проверки моделей Gemini...\n');
+  console.log('Запуск динамического автопилота Gemini...\n');
   try {
-    const report = await checkConfiguredModels({ ping: true });
-    console.log(formatModelReportConsole(report));
+    const autopilot = GeminiAutopilot.getInstance();
+    const plan = await autopilot.refresh(true);
 
-    const failed = report.configured.filter(c => !c.pingOk);
-    if (failed.length > 0) {
-      console.warn(`\n⚠️ Предупреждение: ${failed.length} настроенных моделей не прошли проверку доступности.`);
+    console.log(formatAutopilotReportConsole(plan));
+
+    if (plan.fromFallback) {
+      console.warn('\n⚠️ Предупреждение: Автопилот перешел в резервный режим (.env). Ни одна живая модель из Google API не ответила успешно.');
       process.exit(1);
     } else {
-      console.log('\n🎉 Все настроенные модели успешно доступны и готовы к работе!');
+      console.log(`\n🎉 Автопилот успешно настроен! Выбрано моделей: ${plan.models.length}.`);
+      console.log(`   📸 Основная фото:     ${plan.photoModels[0]}`);
+      console.log(`   🎙 Основная аудио:    ${plan.voiceModels[0]}`);
+      console.log(`   ⚡️ Основная эскалация: ${plan.complexModels[0]}`);
       process.exit(0);
     }
   } catch (err: any) {
-    console.error('Ошибка проверки моделей:', err.message || err);
+    console.error('Ошибка запуска автопилота:', err.message || err);
     process.exit(1);
   }
 }

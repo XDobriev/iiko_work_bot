@@ -315,8 +315,67 @@
       color: var(--success-color);
     }
 
+    .iiko-match-badge.needs-selection {
+      color: var(--warning-color);
+    }
+
+    .iiko-match-badge.not-found {
+      color: var(--danger-color);
+    }
+
     .iiko-match-badge.unmatched {
       color: var(--warning-color);
+    }
+
+    .suggestion-chips-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 5px;
+    }
+
+    .suggestion-chips-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--hint-color);
+    }
+
+    .chip-suggestion-btn {
+      background: rgba(0, 122, 255, 0.08);
+      border: 1px solid rgba(0, 122, 255, 0.22);
+      color: var(--btn-color);
+      border-radius: 12px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      transition: all 0.15s ease;
+    }
+
+    .chip-suggestion-btn:hover {
+      background: rgba(0, 122, 255, 0.16);
+    }
+
+    .chip-suggestion-btn:active {
+      transform: scale(0.96);
+    }
+
+    .unmatched-warning-box {
+      background: rgba(255, 59, 48, 0.10);
+      border: 1px solid rgba(255, 59, 48, 0.3);
+      color: var(--danger-color);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .btn-toggle-mapping {
@@ -648,6 +707,7 @@
         <span class="summary-total-val" id="total-val">0 ₽</span>
       </div>
       <div id="warehouse-breakdown" class="summary-breakdown" style="font-size: 13px; color: var(--hint-color); margin-top: 6px; display: none;"></div>
+      <div id="unmatched-warning-container"></div>
       <div id="written-check-container"></div>
     </div>
 
@@ -703,8 +763,336 @@
 
     let knownSuppliers = [];
     let knownProducts = [];
+    let catalogProducts = [];
     let existingMappings = [];
     let recentInvoices = [];
+    let serverMatcherAnalysis = null;
+
+    function normalizeName(str) {
+      return String(str || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[*«»"'()[\],.:;!?-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function tokenize(str) {
+      return normalizeName(str).split(' ').filter(t => t.length > 0);
+    }
+
+    function levenshtein(a, b) {
+      if (a === b) return 0;
+      if (!a.length) return b.length;
+      if (!b.length) return a.length;
+      const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        let prev = i;
+        for (let j = 1; j <= b.length; j++) {
+          const val = a[i - 1] === b[j - 1] ? row[j - 1] : Math.min(row[j - 1], prev, row[j]) + 1;
+          row[j - 1] = prev;
+          prev = val;
+        }
+        row[b.length] = prev;
+      }
+      return row[b.length];
+    }
+
+    // Auto-detect best iiko catalog match and suggestions for an item
+    function analyzeItemMatch(rawName, explicitVal) {
+      if (!rawName || !rawName.trim()) {
+        return { status: 'not_found', matchedName: '', suggestions: [] };
+      }
+
+      const clean = normalizeName(rawName);
+
+      // 1. Explicit user selection or pre-set mapping
+      if (explicitVal && explicitVal.trim()) {
+        return {
+          status: 'matched',
+          matchedName: explicitVal.trim(),
+          suggestions: []
+        };
+      }
+
+      // 2. Check existing mapping table from database
+      const m = existingMappings.find(x => x.raw_name && (x.raw_name.toLowerCase() === rawName.trim().toLowerCase() || normalizeName(x.raw_name) === clean));
+      if (m && m.iiko_product_name) {
+        return {
+          status: 'matched',
+          matchedName: m.iiko_product_name,
+          suggestions: []
+        };
+      }
+
+      // Get list of catalog product objects { id, name }
+      const allProducts = (catalogProducts.length > 0)
+        ? catalogProducts.map(p => typeof p === 'string' ? { id: '', name: p } : p)
+        : knownProducts.map(p => ({ id: '', name: p }));
+
+      // 3. Exact normalized product match in catalog
+      const exact = allProducts.find(p => normalizeName(p.name) === clean);
+      if (exact) {
+        return {
+          status: 'matched',
+          matchedName: exact.name,
+          suggestions: []
+        };
+      }
+
+      // 4. Score candidates
+      const qTokens = tokenize(rawName);
+      if (qTokens.length === 0) {
+        return { status: 'not_found', matchedName: '', suggestions: [] };
+      }
+
+      const scored = [];
+      for (const prod of allProducts) {
+        const prodNorm = normalizeName(prod.name);
+        const pTokens = tokenize(prod.name);
+        if (pTokens.length === 0) continue;
+
+        let weight = 0;
+        let count = 0;
+
+        for (const qt of qTokens) {
+          let bestToken = 0;
+          for (const pt of pTokens) {
+            if (qt === pt) {
+              bestToken = 1.0;
+              break;
+            }
+            const minLen = Math.min(qt.length, pt.length);
+            const isNum = /^\d+$/.test(qt) || /^\d+$/.test(pt);
+            if (!isNum && minLen >= 3 && (qt.startsWith(pt) || pt.startsWith(qt)) && Math.abs(qt.length - pt.length) <= 3) {
+              bestToken = Math.max(bestToken, 0.9);
+              continue;
+            }
+            if (qt.length >= 4 && pt.length >= 4) {
+              const d = levenshtein(qt, pt);
+              if (d === 1) bestToken = Math.max(bestToken, 0.9);
+              else if (d === 2 && (qt.length >= 5 || pt.length >= 5)) bestToken = Math.max(bestToken, 0.75);
+            }
+          }
+          if (bestToken > 0) {
+            weight += bestToken;
+            count++;
+          }
+        }
+
+        const coverage = weight / qTokens.length;
+        if (coverage < 0.35) continue;
+
+        const jaccard = weight / (pTokens.length + qTokens.length - weight);
+        let score = (coverage * 0.65) + (jaccard * 0.35);
+        if (prodNorm.includes(clean)) score += 0.05;
+        if (pTokens.length > 0 && qTokens.length > 0) {
+          const hd = levenshtein(qTokens[0], pTokens[0]);
+          if (hd <= 1) score += 0.08;
+        }
+
+        if (score >= 0.35) {
+          scored.push({ id: prod.id, name: prod.name, score: Math.round(score * 100) / 100 });
+        }
+      }
+
+      scored.sort((a, b) => b.score - a.score || a.name.length - b.name.length);
+      const top3 = scored.slice(0, 3);
+
+      // Check ambiguity: if 2 or more close candidates exist (diff <= 0.12), require user choice
+      if (top3.length >= 2 && (top3[0].score - top3[1].score <= 0.12)) {
+        return {
+          status: 'needs_selection',
+          matchedName: '',
+          suggestions: top3
+        };
+      }
+
+      if (top3.length > 0 && top3[0].score >= 0.88) {
+        return {
+          status: 'matched',
+          matchedName: top3[0].name,
+          suggestions: top3
+        };
+      }
+
+      if (top3.length > 0 && top3[0].score >= 0.40) {
+        return {
+          status: 'needs_selection',
+          matchedName: '',
+          suggestions: top3
+        };
+      }
+
+      return {
+        status: 'not_found',
+        matchedName: '',
+        suggestions: []
+      };
+    }
+
+    function renderChipsHtml(index, suggestions) {
+      if (!suggestions || suggestions.length === 0) return '';
+      return `
+        <div class="suggestion-chips-row">
+          <span class="suggestion-chips-label">Подсказки:</span>
+          ${suggestions.map(s => `
+            <button type="button" class="chip-suggestion-btn" data-index="${index}" data-name="${escapeHtml(s.name)}">
+              💡 ${escapeHtml(s.name)}
+            </button>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function renderItemMatcherBox(item, index) {
+      const explicitVal = item.iikoMapping || item.iiko_product_name || '';
+      const analysis = analyzeItemMatch(item.name, explicitVal);
+
+      // Auto-assign if high-confidence match
+      if (analysis.status === 'matched' && !item.iikoMapping && analysis.matchedName) {
+        item.iikoMapping = analysis.matchedName;
+        item.iiko_product_name = analysis.matchedName;
+        const found = catalogProducts.find(p => (typeof p === 'object' && p.name === analysis.matchedName) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(analysis.matchedName));
+        if (found && typeof found === 'object' && found.id) {
+          item.iiko_product_id = found.id;
+        }
+      }
+
+      let badgeClass = 'iiko-match-badge';
+      let badgeHtml = '';
+      let toggleBtnText = '';
+
+      if (analysis.status === 'matched') {
+        const val = item.iikoMapping || analysis.matchedName;
+        badgeClass += ' matched';
+        badgeHtml = `🟢 iiko: <b>${escapeHtml(val)}</b>`;
+        toggleBtnText = 'Изменить ▾';
+      } else if (analysis.status === 'needs_selection') {
+        badgeClass += ' needs-selection';
+        badgeHtml = `🟡 iiko: Требует выбора`;
+        toggleBtnText = '🔍 Выбрать из каталога ▾';
+      } else {
+        badgeClass += ' not-found';
+        badgeHtml = `🔴 iiko: Не найдено в номенклатуре`;
+        toggleBtnText = '🔍 Найти в iiko ▾';
+      }
+
+      const chipsHtml = analysis.status === 'needs_selection' ? renderChipsHtml(index, analysis.suggestions) : '';
+      const wasOpen = document.getElementById(`mapping-editor-${index}`)?.classList.contains('open');
+
+      return `
+        <div class="iiko-matcher-row">
+          <span id="iiko-badge-${index}" class="${badgeClass}">${badgeHtml}</span>
+          <button type="button" class="btn-toggle-mapping" onclick="toggleMappingEditor(${index})">
+            ${toggleBtnText}
+          </button>
+        </div>
+        <div id="chips-container-${index}">${chipsHtml}</div>
+        <div id="mapping-editor-${index}" class="mapping-editor ${wasOpen ? 'open' : ''}">
+          <input type="text" class="mapping-input" list="products-list" 
+            placeholder="Выберите товар из номенклатуры iiko" 
+            value="${escapeHtml(item.iikoMapping || item.iiko_product_name || '')}" 
+            oninput="applyIikoMapping(${index}, this.value)">
+          <label class="mapping-save-checkbox-label">
+            <input type="checkbox" class="mapping-checkbox" ${item.saveMapping !== false ? 'checked' : ''} onchange="markDirty()">
+            Запомнить сопоставление в справочнике ресторана
+          </label>
+        </div>
+      `;
+    }
+
+    function selectSuggestion(index, name) {
+      haptic('selection');
+      syncItemsFromDom();
+      if (!invoiceData.items[index]) return;
+      invoiceData.items[index].iikoMapping = name;
+      invoiceData.items[index].iiko_product_name = name;
+      const found = catalogProducts.find(p => (typeof p === 'object' && p.name === name) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(name));
+      if (found && typeof found === 'object' && found.id) {
+        invoiceData.items[index].iiko_product_id = found.id;
+      }
+      markDirty();
+      updateItemMatcherBox(index);
+      calculateTotals();
+    }
+
+    function applyIikoMapping(index, val) {
+      markDirty();
+      if (!invoiceData.items[index]) return;
+      const clean = val.trim();
+      invoiceData.items[index].iikoMapping = clean;
+      invoiceData.items[index].iiko_product_name = clean || undefined;
+      const found = catalogProducts.find(p => (typeof p === 'object' && p.name === clean) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(clean));
+      if (found && typeof found === 'object' && found.id) {
+        invoiceData.items[index].iiko_product_id = found.id;
+      } else {
+        invoiceData.items[index].iiko_product_id = undefined;
+      }
+      updateItemMatcherBox(index);
+      calculateTotals();
+    }
+
+    function updateItemMatcherBox(index) {
+      const box = document.getElementById(`iiko-matcher-box-${index}`);
+      if (!box || !invoiceData.items[index]) return;
+
+      const item = invoiceData.items[index];
+      const explicitVal = item.iikoMapping || item.iiko_product_name || '';
+      const analysis = analyzeItemMatch(item.name, explicitVal);
+
+      // Auto-assign if high-confidence match
+      if (analysis.status === 'matched' && !item.iikoMapping && analysis.matchedName) {
+        item.iikoMapping = analysis.matchedName;
+        item.iiko_product_name = analysis.matchedName;
+        const found = catalogProducts.find(p => (typeof p === 'object' && p.name === analysis.matchedName) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(analysis.matchedName));
+        if (found && typeof found === 'object' && found.id) {
+          item.iiko_product_id = found.id;
+        }
+      }
+
+      // Preserve focus & caret if user is actively typing in the mapping input
+      const existingInput = document.querySelector(`#mapping-editor-${index} .mapping-input`);
+      const isInputFocused = existingInput && document.activeElement === existingInput;
+
+      if (isInputFocused) {
+        const badge = document.getElementById(`iiko-badge-${index}`);
+        const toggleBtn = box.querySelector('.btn-toggle-mapping');
+        const chipsContainer = document.getElementById(`chips-container-${index}`);
+
+        let badgeClass = 'iiko-match-badge';
+        let badgeHtml = '';
+        let toggleBtnText = '';
+
+        if (analysis.status === 'matched') {
+          const val = item.iikoMapping || analysis.matchedName;
+          badgeClass += ' matched';
+          badgeHtml = `🟢 iiko: <b>${escapeHtml(val)}</b>`;
+          toggleBtnText = 'Изменить ▾';
+        } else if (analysis.status === 'needs_selection') {
+          badgeClass += ' needs-selection';
+          badgeHtml = `🟡 iiko: Требует выбора`;
+          toggleBtnText = '🔍 Выбрать из каталога ▾';
+        } else {
+          badgeClass += ' not-found';
+          badgeHtml = `🔴 iiko: Не найдено в номенклатуре`;
+          toggleBtnText = '🔍 Найти в iiko ▾';
+        }
+
+        if (badge) {
+          badge.className = badgeClass;
+          badge.innerHTML = badgeHtml;
+        }
+        if (toggleBtn) {
+          toggleBtn.innerText = toggleBtnText;
+        }
+        if (chipsContainer) {
+          chipsContainer.innerHTML = analysis.status === 'needs_selection' ? renderChipsHtml(index, analysis.suggestions) : '';
+        }
+      } else {
+        box.innerHTML = renderItemMatcherBox(item, index);
+      }
+    }
 
     // Helper: Haptic feedback
     function haptic(type = 'light') {
@@ -767,7 +1155,13 @@
         }
 
         if (mappingInput) {
-          invoiceData.items[index].iikoMapping = mappingInput.value.trim();
+          const mVal = mappingInput.value.trim();
+          invoiceData.items[index].iikoMapping = mVal;
+          invoiceData.items[index].iiko_product_name = mVal || undefined;
+          const found = catalogProducts.find(p => (typeof p === 'object' && p.name === mVal) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(mVal));
+          if (found && typeof found === 'object' && found.id) {
+            invoiceData.items[index].iiko_product_id = found.id;
+          }
         }
         if (mappingCheckbox) {
           invoiceData.items[index].saveMapping = mappingCheckbox.checked;
@@ -805,59 +1199,12 @@
       return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    // Auto-detect best iiko catalog match for an item
-    function findBestIikoMatch(rawName) {
-      if (!rawName || !rawName.trim()) return null;
-      const clean = rawName.trim().toLowerCase();
-
-      // 1. Exact existing mapping
-      const m = existingMappings.find(x => x.raw_name && x.raw_name.toLowerCase() === clean);
-      if (m && m.iiko_product_name) {
-        return { name: m.iiko_product_name, isConfirmed: true };
-      }
-
-      // 2. Exact match in known products
-      const exact = knownProducts.find(p => p.toLowerCase() === clean);
-      if (exact) {
-        return { name: exact, isConfirmed: true };
-      }
-
-      // 3. Substring / token match
-      const tokens = clean.split(/\s+/).filter(t => t.length >= 3);
-      if (tokens.length > 0) {
-        const found = knownProducts.find(p => {
-          const pl = p.toLowerCase();
-          return tokens.every(t => pl.includes(t));
-        });
-        if (found) {
-          return { name: found, isConfirmed: false };
-        }
-      }
-
-      return null;
-    }
-
     // Toggle mapping dropdown
     function toggleMappingEditor(index) {
       haptic('light');
       const box = document.getElementById(`mapping-editor-${index}`);
       if (box) {
         box.classList.toggle('open');
-      }
-    }
-
-    function applyIikoMapping(index, val) {
-      markDirty();
-      invoiceData.items[index].iikoMapping = val.trim();
-      const badge = document.getElementById(`iiko-badge-${index}`);
-      if (badge) {
-        if (val.trim()) {
-          badge.className = 'iiko-match-badge matched';
-          badge.innerHTML = `🟢 iiko: <b>${escapeHtml(val.trim())}</b>`;
-        } else {
-          badge.className = 'iiko-match-badge unmatched';
-          badge.innerHTML = `🟡 iiko: Не сопоставлен`;
-        }
       }
     }
 
@@ -881,20 +1228,6 @@
           `<option value="${u}" ${item.unit === u ? 'selected' : ''}>${u}</option>`
         ).join('');
 
-        // Find or use existing iiko mapping
-        if (!item.iikoMapping) {
-          const detected = findBestIikoMatch(item.name);
-          if (detected) {
-            item.iikoMapping = detected.name;
-          }
-        }
-
-        const hasMapping = Boolean(item.iikoMapping && item.iikoMapping.trim());
-        const mappingBadgeClass = hasMapping ? 'iiko-match-badge matched' : 'iiko-match-badge unmatched';
-        const mappingBadgeHtml = hasMapping
-          ? `🟢 iiko: <b>${escapeHtml(item.iikoMapping)}</b>`
-          : `🟡 iiko: Не сопоставлен`;
-
         const itemWh = item.warehouse || (isHouseholdName(item.name) ? 'household' : (invoiceData.warehouse || 'kitchen'));
         item.warehouse = itemWh;
 
@@ -911,23 +1244,8 @@
           </div>
 
           <!-- iiko Matcher Section -->
-          <div class="iiko-matcher-box">
-            <div class="iiko-matcher-row">
-              <span id="iiko-badge-${index}" class="${mappingBadgeClass}">${mappingBadgeHtml}</span>
-              <button type="button" class="btn-toggle-mapping" onclick="toggleMappingEditor(${index})">
-                ${hasMapping ? 'Изменить ▾' : '🔍 Сопоставить ▾'}
-              </button>
-            </div>
-            <div id="mapping-editor-${index}" class="mapping-editor">
-              <input type="text" class="mapping-input" list="products-list" 
-                placeholder="Выберите товар из номенклатуры iiko" 
-                value="${escapeHtml(item.iikoMapping || '')}" 
-                oninput="applyIikoMapping(${index}, this.value)">
-              <label class="mapping-save-checkbox-label">
-                <input type="checkbox" class="mapping-checkbox" ${item.saveMapping !== false ? 'checked' : ''} onchange="markDirty()">
-                Запомнить сопоставление в справочнике ресторана
-              </label>
-            </div>
+          <div class="iiko-matcher-box" id="iiko-matcher-box-${index}">
+            ${renderItemMatcherBox(item, index)}
           </div>
 
           <div class="item-card-body">
@@ -959,14 +1277,10 @@
 
     function onItemNameInput(index, val) {
       markDirty();
-      invoiceData.items[index].name = val.trim();
-      // If no manual mapping set yet, try to auto-match
-      if (!invoiceData.items[index].iikoMapping) {
-        const detected = findBestIikoMatch(val.trim());
-        if (detected) {
-          applyIikoMapping(index, detected.name);
-        }
-      }
+      if (!invoiceData.items[index]) return;
+      invoiceData.items[index].name = val;
+      updateItemMatcherBox(index);
+      calculateTotals();
     }
 
     function onItemQtyInput(index, val) {
@@ -1085,6 +1399,29 @@
         tg.MainButton.show();
       }
 
+      // Check unmatched items
+      let unmatchedCount = 0;
+      invoiceData.items.forEach(it => {
+        const explicit = it.iikoMapping || it.iiko_product_name || '';
+        const an = analyzeItemMatch(it.name, explicit);
+        if (an.status !== 'matched') {
+          unmatchedCount++;
+        }
+      });
+
+      const unmatchedBox = document.getElementById('unmatched-warning-container');
+      if (unmatchedBox) {
+        if (unmatchedCount > 0) {
+          unmatchedBox.innerHTML = `
+            <div class="unmatched-warning-box">
+              ⚠️ Несопоставленных позиций: <b>${unmatchedCount}</b>. Отправка в iiko заблокирована до их сопоставления.
+            </div>
+          `;
+        } else {
+          unmatchedBox.innerHTML = '';
+        }
+      }
+
       // Check handwritten total discrepancy
       const checkEl = document.getElementById('written-check-container');
       if (invoiceData.total_written != null && invoiceData.total_written > 0) {
@@ -1123,10 +1460,20 @@
       // Extract confirmed mappings to persist in SQLite
       const mappingsToSave = [];
       invoiceData.items.forEach(it => {
-        if (it.name && it.iikoMapping && it.saveMapping !== false) {
+        const val = (it.iikoMapping || it.iiko_product_name || '').trim();
+        it.iikoMapping = val;
+        it.iiko_product_name = val || undefined;
+        if (val) {
+          const found = catalogProducts.find(p => (typeof p === 'object' && p.name === val) || normalizeName(typeof p === 'string' ? p : p.name) === normalizeName(val));
+          if (found && typeof found === 'object' && found.id) {
+            it.iiko_product_id = found.id;
+          }
+        }
+        if (it.name && val && it.saveMapping !== false) {
           mappingsToSave.push({
             rawName: it.name,
-            iikoProductName: it.iikoMapping
+            iikoProductName: val,
+            iikoProductId: it.iiko_product_id
           });
         }
       });
@@ -1187,6 +1534,18 @@
       if (fallbackBar) fallbackBar.style.display = 'none';
     }
 
+    // Delegated click handler for quick suggestion chips
+    document.addEventListener('click', function(e) {
+      const chipBtn = e.target.closest('.chip-suggestion-btn');
+      if (chipBtn) {
+        const idx = parseInt(chipBtn.getAttribute('data-index'), 10);
+        const name = chipBtn.getAttribute('data-name');
+        if (!isNaN(idx) && name) {
+          selectSuggestion(idx, name);
+        }
+      }
+    });
+
     // Switch invoice from header dropdown
     function switchInvoice(newId) {
       if (!newId) return;
@@ -1216,10 +1575,20 @@
             const suppList = document.getElementById('suppliers-list');
             suppList.innerHTML = knownSuppliers.map(s => `<option value="${escapeHtml(s)}">`).join('');
           }
-          if (Array.isArray(json.knownItems)) {
+          if (Array.isArray(json.catalogProducts) && json.catalogProducts.length > 0) {
+            catalogProducts = json.catalogProducts;
+            const prodList = document.getElementById('products-list');
+            prodList.innerHTML = catalogProducts.map(p => {
+              const name = typeof p === 'string' ? p : p.name;
+              return `<option value="${escapeHtml(name)}">`;
+            }).join('');
+          } else if (Array.isArray(json.knownItems)) {
             knownProducts = json.knownItems;
             const prodList = document.getElementById('products-list');
             prodList.innerHTML = knownProducts.map(p => `<option value="${escapeHtml(p)}">`).join('');
+          }
+          if (json.matcherAnalysis) {
+            serverMatcherAnalysis = json.matcherAnalysis;
           }
           if (Array.isArray(json.mappings)) {
             existingMappings = json.mappings;

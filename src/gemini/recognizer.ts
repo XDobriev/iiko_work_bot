@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { InvoiceData, InvoiceDataSchema } from '../types/index.js';
 import { classifyInvoiceItems } from '../workflow/warehouse-classifier.js';
+import { GeminiAutopilot } from './autopilot.js';
 
 export type RecognizerTask = 'photo' | 'voice' | 'complex' | 'general';
 
@@ -95,30 +96,42 @@ export function detectImageMimeType(buffer: Buffer): string {
 
 export class GeminiInvoiceRecognizer {
   private apiKey: string;
+  private hasExplicitModels: boolean = false;
   private models: string[];
   private photoModels: string[];
   private voiceModels: string[];
   private complexModels: string[];
+  private autopilot?: GeminiAutopilot;
 
-  constructor(apiKey?: string, models?: string[] | string | RecognizerModelOptions) {
+  constructor(
+    apiKey?: string,
+    models?: string[] | string | RecognizerModelOptions,
+    autopilot?: GeminiAutopilot
+  ) {
     this.apiKey = apiKey || config.gemini.apiKey;
+    this.autopilot = autopilot || GeminiAutopilot.getInstance();
+
     if (Array.isArray(models)) {
+      this.hasExplicitModels = true;
       this.models = models.filter(Boolean);
       this.photoModels = [...this.models];
       this.voiceModels = [...this.models];
       this.complexModels = [...this.models];
     } else if (typeof models === 'string' && models.trim()) {
+      this.hasExplicitModels = true;
       const primary = models.trim();
       this.models = [primary, ...config.gemini.models.filter(m => m !== primary)];
       this.photoModels = [...this.models];
       this.voiceModels = [...this.models];
       this.complexModels = [...this.models];
     } else if (models && typeof models === 'object') {
+      this.hasExplicitModels = true;
       this.models = models.models && models.models.length > 0 ? models.models : config.gemini.models;
       this.photoModels = models.photoModels && models.photoModels.length > 0 ? models.photoModels : config.gemini.photoModels;
       this.voiceModels = models.voiceModels && models.voiceModels.length > 0 ? models.voiceModels : config.gemini.voiceModels;
       this.complexModels = models.complexModels && models.complexModels.length > 0 ? models.complexModels : config.gemini.complexModels;
     } else {
+      this.hasExplicitModels = false;
       this.models = config.gemini.models;
       this.photoModels = config.gemini.photoModels;
       this.voiceModels = config.gemini.voiceModels;
@@ -127,6 +140,13 @@ export class GeminiInvoiceRecognizer {
   }
 
   getCandidateModels(task?: RecognizerTask): string[] {
+    if (!this.hasExplicitModels && this.autopilot) {
+      const active = this.autopilot.getActiveModels(task || 'general');
+      if (active && active.length > 0) {
+        return active;
+      }
+    }
+
     if (task === 'voice') return this.voiceModels;
     if (task === 'complex') return this.complexModels;
     if (task === 'photo') return this.photoModels;

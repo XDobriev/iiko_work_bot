@@ -86,14 +86,22 @@ export function getDatabase(customPath?: string): DatabaseSync {
       sum REAL NOT NULL DEFAULT 0,
       unit TEXT,
       warehouse TEXT,
+      iiko_product_name TEXT,
+      iiko_product_id TEXT,
       created_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
   `);
 
-  // Ensure warehouse column exists in invoice_items if table was created in older version
+  // Ensure columns exist in invoice_items if table was created in older version
   const itemColumns = (db.prepare(`PRAGMA table_info(invoice_items)`).all() as Array<{ name: string }>).map(c => c.name);
   if (!itemColumns.includes('warehouse')) {
     db.exec(`ALTER TABLE invoice_items ADD COLUMN warehouse TEXT;`);
+  }
+  if (!itemColumns.includes('iiko_product_name')) {
+    db.exec(`ALTER TABLE invoice_items ADD COLUMN iiko_product_name TEXT;`);
+  }
+  if (!itemColumns.includes('iiko_product_id')) {
+    db.exec(`ALTER TABLE invoice_items ADD COLUMN iiko_product_id TEXT;`);
   }
 
   db.exec(`

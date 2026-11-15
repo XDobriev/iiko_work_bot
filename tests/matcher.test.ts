@@ -150,6 +150,72 @@ test('ProductCatalogMatcher rejects unrelated queries below threshold', () => {
   assert.strictEqual(matcher.match('   '), null);
 });
 
+test('ProductCatalogMatcher findSuggestions returns top-3 ranked candidate suggestions', () => {
+  const matcher = new ProductCatalogMatcher(mockCatalog);
+  const suggestions = matcher.findSuggestions('сыр', 3);
+  assert.ok(suggestions.length >= 2, 'Must return multiple cheese candidates');
+  assert.strictEqual(suggestions[0].product.name, 'Сыр'); // Exact match
+  assert.strictEqual(suggestions[0].score, 1.0);
+  assert.ok(suggestions.some(s => s.product.name.includes('Сулугуни')));
+});
+
+test('ProductCatalogMatcher analyzeItem correctly classifies matched, needs_selection, and not_found', () => {
+  // Catalog without generic "Сыр" to test ambiguity
+  const ambiguousCatalog: CatalogProduct[] = [
+    { id: '1', name: 'Сыр Сулугуни весовой', unit: 'кг' },
+    { id: '2', name: 'Сыр Гауда 45% брусок', unit: 'кг' },
+    { id: '3', name: 'Говядина вырезка охл', unit: 'кг' }
+  ];
+
+  const matcher = new ProductCatalogMatcher(ambiguousCatalog);
+
+  // 1. Ambiguous query "Сыр" -> needs_selection (🟡)
+  const analysisCheese = matcher.analyzeItem('Сыр');
+  assert.strictEqual(analysisCheese.status, 'needs_selection');
+  assert.ok(analysisCheese.suggestions.length >= 2);
+  assert.strictEqual(analysisCheese.match, null, 'Must not pick one cheese over another when ambiguous');
+
+  // 2. High-confidence query -> matched (🟢)
+  const analysisBeef = matcher.analyzeItem('Говядина вырезка');
+  assert.strictEqual(analysisBeef.status, 'matched');
+  assert.strictEqual(analysisBeef.match?.product.id, '3');
+
+  // 3. Unknown item -> not_found (🔴)
+  const analysisUnknown = matcher.analyzeItem('НеведомыйПорошокXYZ');
+  assert.strictEqual(analysisUnknown.status, 'not_found');
+  assert.strictEqual(analysisUnknown.suggestions.length, 0);
+
+  // 4. Explicit product selection overrides -> matched (🟢)
+  const analysisManual = matcher.analyzeItem('Сыр', undefined, 'Сыр Сулугуни весовой');
+  assert.strictEqual(analysisManual.status, 'matched');
+  assert.strictEqual(analysisManual.match?.product.name, 'Сыр Сулугуни весовой');
+});
+
+test('IikoClient getProducts caches products in memory and supports clearing cache', async () => {
+  const { IikoClient } = await import('../src/iiko/client.js');
+  const client = new IikoClient();
+
+  let requestCount = 0;
+  (client as any).request = async () => {
+    requestCount++;
+    return [
+      { id: '1', name: 'Товар 1', isDeleted: false },
+      { id: '2', name: 'Товар 2', isDeleted: false }
+    ];
+  };
+
+  const prods1 = await client.getProducts();
+  assert.strictEqual(requestCount, 1);
+  const prods2 = await client.getProducts();
+  assert.strictEqual(requestCount, 1, 'Second call should use cached products without re-requesting');
+  assert.strictEqual(prods1, prods2);
+
+  client.clearProductsCache();
+  const prods3 = await client.getProducts();
+  assert.strictEqual(requestCount, 2, 'Should re-fetch after clearProductsCache');
+  assert.strictEqual(prods3.length, 2);
+});
+
 test('IikoClient findEntityByName eliminates stop-word false positive matching', async () => {
   const { IikoClient } = await import('../src/iiko/client.js');
   const client = new IikoClient();

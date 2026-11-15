@@ -16,7 +16,6 @@ const HOUSEHOLD_KEYWORD_ROOTS: string[] = [
   'уголь',
   'дез',
   'фольг',
-  'контейнер',
   'мыл',
   'белизн',
   'пленк',
@@ -27,7 +26,6 @@ const HOUSEHOLD_KEYWORD_ROOTS: string[] = [
   'туалетн',
   'зубочистк',
   'трубочк',
-  'стакан',
   'мусорн'
 ];
 
@@ -102,7 +100,10 @@ export function classifyInvoiceItems(
 /**
  * Partitions items into two separate lists: kitchen vs household.
  */
-export function partitionItemsByWarehouse(items: InvoiceItem[]): {
+export function partitionItemsByWarehouse(
+  items: InvoiceItem[],
+  defaultWarehouse: WarehouseType = 'kitchen'
+): {
   kitchen: InvoiceItem[];
   household: InvoiceItem[];
   isMixed: boolean;
@@ -111,7 +112,7 @@ export function partitionItemsByWarehouse(items: InvoiceItem[]): {
   const household: InvoiceItem[] = [];
 
   for (const item of items) {
-    const wh = item.warehouse || classifyItemWarehouse(item.name);
+    const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, defaultWarehouse);
     if (wh === 'household') {
       household.push({ ...item, warehouse: 'household' });
     } else {

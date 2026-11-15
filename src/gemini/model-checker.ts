@@ -76,13 +76,21 @@ export async function fetchGoogleModels(apiKey?: string): Promise<GoogleModelInf
     });
 }
 
+export interface PingResult {
+  ok: boolean;
+  latencyMs?: number;
+  error?: string;
+  hasReasoning?: boolean;
+  thoughtsTokenCount?: number;
+}
+
 /**
  * Sends a lightweight prompt to verify model accessibility and measure response latency.
  */
 export async function pingModel(
   model: string,
   apiKey?: string
-): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {
+): Promise<PingResult> {
   const key = apiKey || config.gemini.apiKey;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
@@ -107,7 +115,19 @@ export async function pingModel(
       return { ok: false, latencyMs, error: `HTTP ${response.status}: ${errText.slice(0, 80)}` };
     }
 
-    return { ok: true, latencyMs };
+    let thoughtsTokenCount: number | undefined;
+    let hasReasoning = false;
+    try {
+      const json = (await response.json()) as any;
+      thoughtsTokenCount = json.usageMetadata?.thoughtsTokenCount;
+      const candidateParts = json.candidates?.[0]?.content?.parts || [];
+      const hasThoughtPart = candidateParts.some((p: any) => p.thought === true || typeof p.thoughtSignature === 'string');
+      hasReasoning = Boolean((typeof thoughtsTokenCount === 'number' && thoughtsTokenCount > 0) || hasThoughtPart);
+    } catch {
+      // ignore json parse error in ping
+    }
+
+    return { ok: true, latencyMs, hasReasoning, thoughtsTokenCount };
   } catch (err: any) {
     return { ok: false, latencyMs: Date.now() - start, error: err.message || String(err) };
   }
@@ -168,31 +188,39 @@ export async function checkConfiguredModels(options?: {
     };
   });
 
-  // Calculate recommendations: high-tier or newer models not yet configured
+  // Calculate recommendations dynamically: any eligible Gemini models not yet configured
   const configuredSet = new Set(configured.map(c => c.model.toLowerCase()));
   const recommendations: string[] = [];
 
-  const candidatesToRecommend = [
-    'gemini-3.6-flash',
-    'gemini-3.8-flash',
-    'gemini-3.5-flash',
-    'gemini-3.5-flash-lite'
-  ];
+  // Filter Google models dynamically without hardcoding
+  const eligibleCandidates = googleModels
+    .map(m => m.name)
+    .filter(name => {
+      const lower = name.toLowerCase();
+      return (
+        lower.includes('gemini') &&
+        !lower.includes('-tts') &&
+        !lower.includes('embedding') &&
+        !lower.includes('robotics') &&
+        !lower.includes('-image') &&
+        !lower.includes('banana') &&
+        !lower.includes('computer-use') &&
+        !configuredSet.has(lower)
+      );
+    });
 
-  for (const rec of candidatesToRecommend) {
-    if (googleModelNames.has(rec) && !configuredSet.has(rec)) {
-      if (shouldPing && key) {
-        let ping = pingResults.get(rec);
-        if (!ping) {
-          ping = await pingModel(rec, key);
-          pingResults.set(rec, ping);
-        }
-        if (ping.ok) {
-          recommendations.push(rec);
-        }
-      } else {
+  for (const rec of eligibleCandidates) {
+    if (shouldPing && key) {
+      let ping = pingResults.get(rec);
+      if (!ping) {
+        ping = await pingModel(rec, key);
+        pingResults.set(rec, ping);
+      }
+      if (ping.ok) {
         recommendations.push(rec);
       }
+    } else {
+      recommendations.push(rec);
     }
   }
 

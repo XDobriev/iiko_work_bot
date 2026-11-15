@@ -5,6 +5,13 @@ import { InvoicesRepository } from '../db/invoices.repo.js';
 import { GeminiInvoiceRecognizer } from '../gemini/recognizer.js';
 import { IikoClient, IikoCreateInvoiceResult } from '../iiko/client.js';
 import {
+  CatalogProduct,
+  ProductCatalogMatcher,
+  MatchStatus,
+  ProductSuggestion,
+  normalizeIikoName
+} from '../iiko/matcher.js';
+import {
   InvoiceData,
   InvoiceItem,
   HistoricalComparison,
@@ -100,6 +107,71 @@ export class InvoiceWorkflow {
     return this.repo;
   }
 
+  async getCatalogProducts(): Promise<CatalogProduct[]> {
+    if (typeof this.iikoClient.getProducts === 'function') {
+      return this.iikoClient.getProducts();
+    }
+    return [];
+  }
+
+  async enrichItemsWithCatalogMatch(data: InvoiceData): Promise<void> {
+    try {
+      const products = await this.getCatalogProducts();
+      if (products.length > 0) {
+        const matcher = new ProductCatalogMatcher(products, this.repo);
+        for (const item of data.items) {
+          if (!item.iiko_product_name) {
+            const analysis = matcher.analyzeItem(item.name, item.unit);
+            if (analysis.status === 'matched' && analysis.match) {
+              item.iiko_product_name = analysis.match.product.name;
+              item.iiko_product_id = analysis.match.product.id;
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-blocking
+    }
+  }
+
+  async getInvoiceMatcherAnalysis(invoiceId: number): Promise<{
+    items: Array<{
+      index: number;
+      name: string;
+      status: MatchStatus;
+      matchedName?: string;
+      matchedId?: string;
+      suggestions: ProductSuggestion[];
+    }>;
+    hasUnmatched: boolean;
+  }> {
+    const domain = this.repo.getInvoice(invoiceId);
+    if (!domain) {
+      return { items: [], hasUnmatched: false };
+    }
+
+    const products = await this.getCatalogProducts();
+    const matcher = new ProductCatalogMatcher(products, this.repo);
+
+    let hasUnmatched = false;
+    const items = domain.data.items.map((it, idx) => {
+      const analysis = matcher.analyzeItem(it.name, it.unit, it.iiko_product_name);
+      if (analysis.status !== 'matched') {
+        hasUnmatched = true;
+      }
+      return {
+        index: idx,
+        name: it.name,
+        status: analysis.status,
+        matchedName: analysis.match?.product.name || it.iiko_product_name,
+        matchedId: analysis.match?.product.id || it.iiko_product_id,
+        suggestions: analysis.suggestions
+      };
+    });
+
+    return { items, hasUnmatched };
+  }
+
   async processPhotoInvoice(input: {
     photoBuffer: Buffer;
     userId?: number;
@@ -113,6 +185,8 @@ export class InvoiceWorkflow {
       knownItemsWithUnits,
       knownSuppliers
     });
+
+    await this.enrichItemsWithCatalogMatch(data);
 
     const comparison = this.repo.compareWithHistory(data);
 
@@ -159,6 +233,8 @@ export class InvoiceWorkflow {
       knownSuppliers
     });
 
+    await this.enrichItemsWithCatalogMatch(data);
+
     const comparison = this.repo.compareWithHistory(data);
 
     const { invoiceId } = this.repo.saveInvoice(data, {
@@ -182,6 +258,10 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) {
       return { success: false, error: 'Накладная не найдена' };
+    }
+
+    if (domain.invoice.status === 'synced') {
+      return { success: false, error: 'Накладная уже была создана в iiko и не может быть изменена.' };
     }
 
     this.repo.pushSnapshot(invoiceId, domain.data);
@@ -248,6 +328,10 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Накладная не найдена в базе' };
     }
 
+    if (domain.invoice.status === 'synced') {
+      return { success: false, message: 'Накладная уже была создана в iiko и не может быть изменена.' };
+    }
+
     this.repo.pushSnapshot(invoiceId, domain.data);
     const saved = this.repo.updateInvoiceData(invoiceId, data);
     if (!saved) {
@@ -274,6 +358,10 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) {
       return { success: false, message: 'Накладная не найдена в базе' };
+    }
+
+    if (domain.invoice.status === 'synced') {
+      return { success: false, message: 'Накладная уже была создана в iiko и не может быть изменена.' };
     }
 
     // 1. Deterministic fast regex parser first
@@ -339,6 +427,10 @@ export class InvoiceWorkflow {
       return { success: false, message: 'Накладная не найдена в базе' };
     }
 
+    if (domain.invoice.status === 'synced') {
+      return { success: false, message: 'Накладная уже была создана в iiko и не может быть изменена.' };
+    }
+
     try {
       const aiRes = await this.recognizer.recognizeVoiceEdit(domain.data, audioBuffer, mimeType);
       this.repo.pushSnapshot(invoiceId, domain.data);
@@ -373,6 +465,10 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) {
       return { success: false, message: 'Накладная не найдена в базе' };
+    }
+
+    if (domain.invoice.status === 'synced') {
+      return { success: false, message: 'Накладная уже была создана в iiko и не может быть изменена.' };
     }
 
     const prevData = this.repo.popSnapshot(invoiceId);
@@ -417,6 +513,10 @@ export class InvoiceWorkflow {
     const domain = this.repo.getInvoice(invoiceId);
     if (!domain) {
       return { success: false, error: 'Накладная не найдена' };
+    }
+
+    if (domain.invoice.status === 'synced') {
+      return { success: false, error: 'Накладная уже была создана в iiko и не может быть изменена.' };
     }
 
     if (itemIndex < 0 || itemIndex >= domain.data.items.length) {
@@ -467,10 +567,37 @@ export class InvoiceWorkflow {
       };
     }
 
-    const { kitchen, household, isMixed } = partitionItemsByWarehouse(domain.data.items);
+    // Requirement: Block creation if any item is not matched to iiko nomenclature
+    if (typeof this.iikoClient.getProducts === 'function') {
+      try {
+        const products = await this.iikoClient.getProducts();
+        if (products.length > 0) {
+          const matcher = new ProductCatalogMatcher(products, this.repo);
+          const unmatched: string[] = [];
+          for (const item of domain.data.items) {
+            const analysis = matcher.analyzeItem(item.name, item.unit, item.iiko_product_name);
+            if (analysis.status !== 'matched' || !analysis.match) {
+              unmatched.push(item.name);
+            }
+          }
+
+          if (unmatched.length > 0) {
+            return {
+              success: false,
+              unmatched,
+              message: `Создание накладной заблокировано: в накладной обнаружены несопоставленные позиции (${unmatched.join(', ')}). Сопоставьте их с номенклатурой iiko в Mini App перед отправкой.`
+            };
+          }
+        }
+      } catch {
+        // Fallback to client.createInvoice check
+      }
+    }
+
+    const { kitchen, household, isMixed } = partitionItemsByWarehouse(domain.data.items, domain.data.warehouse);
 
     if (isMixed) {
-      // Create TWO separate draft invoices in iikoWeb
+      // Create TWO separate draft invoices in iikoWeb sequentially to avoid cookie session invalidation
       const kitchenData: InvoiceData = {
         ...domain.data,
         warehouse: 'kitchen',
@@ -485,33 +612,7 @@ export class InvoiceWorkflow {
         notes: (domain.data.notes ? domain.data.notes + ' ' : '') + '[Хоз склад]'
       };
 
-      const [resKitchen, resHousehold] = await Promise.all([
-        this.iikoClient.createInvoice(kitchenData),
-        this.iikoClient.createInvoice(householdData)
-      ]);
-
-      if (resKitchen.success && resHousehold.success) {
-        const combinedDocNum = `🍽 Кухня: ${resKitchen.documentNumber || '—'}, 🏠 Хоз: ${resHousehold.documentNumber || '—'}`;
-        this.repo.updateInvoiceStatus(invoiceId, 'synced', combinedDocNum);
-
-        const allUnmatched = [...(resKitchen.unmatched || []), ...(resHousehold.unmatched || [])];
-        const allUnitWarnings = [...(resKitchen.unitWarnings || []), ...(resHousehold.unitWarnings || [])];
-
-        return {
-          success: true,
-          documentNumber: combinedDocNum,
-          documentNumbers: {
-            kitchen: resKitchen.documentNumber,
-            household: resHousehold.documentNumber
-          },
-          isMock: Boolean(resKitchen.isMock || resHousehold.isMock),
-          isSplit: true,
-          unmatched: allUnmatched.length ? allUnmatched : undefined,
-          unitWarnings: allUnitWarnings.length ? allUnitWarnings : undefined,
-          message: `Создано 2 накладных: Склад Кухня (${resKitchen.documentNumber}) и Хоз склад (${resHousehold.documentNumber})`
-        };
-      }
-
+      const resKitchen = await this.iikoClient.createInvoice(kitchenData);
       if (!resKitchen.success) {
         return {
           success: false,
@@ -519,9 +620,37 @@ export class InvoiceWorkflow {
         };
       }
 
+      const resHousehold = await this.iikoClient.createInvoice(householdData);
+      if (!resHousehold.success) {
+        // Kitchen succeeded, household failed. Record partial sync to prevent duplicate creation of kitchen invoice.
+        const partialDocNum = `🍽 Кухня: ${resKitchen.documentNumber || '—'} (Хоз склад: ошибка)`;
+        this.repo.updateInvoiceStatus(invoiceId, 'synced', partialDocNum);
+        return {
+          success: false,
+          documentNumber: resKitchen.documentNumber,
+          isSplit: true,
+          message: `Накладная «Кухня» успешно создана в iiko (#${resKitchen.documentNumber || '—'}), но отправка «Хоз склад» завершилась ошибкой: ${resHousehold.message}. Статус зафиксирован, чтобы избежать дублирования кухни.`
+        };
+      }
+
+      const combinedDocNum = `🍽 Кухня: ${resKitchen.documentNumber || '—'}, 🏠 Хоз: ${resHousehold.documentNumber || '—'}`;
+      this.repo.updateInvoiceStatus(invoiceId, 'synced', combinedDocNum);
+
+      const allUnmatched = [...(resKitchen.unmatched || []), ...(resHousehold.unmatched || [])];
+      const allUnitWarnings = [...(resKitchen.unitWarnings || []), ...(resHousehold.unitWarnings || [])];
+
       return {
-        success: false,
-        message: `Ошибка отправки накладной «Хоз склад» в iiko: ${resHousehold.message}`
+        success: true,
+        documentNumber: combinedDocNum,
+        documentNumbers: {
+          kitchen: resKitchen.documentNumber,
+          household: resHousehold.documentNumber
+        },
+        isMock: Boolean(resKitchen.isMock || resHousehold.isMock),
+        isSplit: true,
+        unmatched: allUnmatched.length ? allUnmatched : undefined,
+        unitWarnings: allUnitWarnings.length ? allUnitWarnings : undefined,
+        message: `Создано 2 накладных: Склад Кухня (${resKitchen.documentNumber}) и Хоз склад (${resHousehold.documentNumber})`
       };
     }
 

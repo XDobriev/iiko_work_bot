@@ -3,6 +3,7 @@ import { getDatabase } from './db/database.js';
 import { createBot, updateTelegramInvoiceCard } from './bot/bot.js';
 import { InvoiceWorkflow } from './workflow/invoice-workflow.js';
 import { startWebAppServer, WebAppServerInstance } from './webapp/server.js';
+import { GeminiAutopilot } from './gemini/autopilot.js';
 
 async function main() {
   console.log('==============================================');
@@ -14,12 +15,25 @@ async function main() {
   getDatabase();
   console.log('✅ База данных SQLite готова.');
 
-  // 2. Validate Gemini Config
-  console.log(`🧠 Gemini модель: ${config.gemini.model}`);
+  // 2. Validate Gemini Config & Initialize Autopilot
   if (!config.gemini.apiKey) {
-    console.warn('⚠️ Внимание: GEMINI_API_KEY не задан в .env!');
+    console.warn('⚠️ Внимание: GEMINI_API_KEY не задан в .env! Автопилот работает в fallback-режиме.');
   } else {
     console.log('🔑 Gemini API ключ загружен.');
+    console.log('🚀 Инициализация динамического автопилота Gemini...');
+    try {
+      const plan = await GeminiAutopilot.getInstance().refresh();
+      if (plan.fromFallback) {
+        console.log('⚠️ [Автопилот] Активирован резервный режим (.env).');
+      } else {
+        console.log(`✨ [Автопилот] Готов к работе! Моделей активно: ${plan.models.length}`);
+        console.log(`   📸 Фото: ${plan.photoModels.join(' -> ')}`);
+        console.log(`   🎙 Голос: ${plan.voiceModels.join(' -> ')}`);
+        console.log(`   ⚡️ Эскалация: ${plan.complexModels.join(' -> ')}`);
+      }
+    } catch (err: any) {
+      console.warn('⚠️ [Автопилот] Ошибка при первичном бенчмарке, включен fallback:', err.message || err);
+    }
   }
 
   // 3. iiko status

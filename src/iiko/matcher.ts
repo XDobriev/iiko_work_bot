@@ -15,6 +15,7 @@ export interface ProductMappingStore {
 
 export type MatchSource = 'mapping' | 'exact' | 'tokens' | 'fuzzy';
 export type UnitCategory = 'weight' | 'volume' | 'piece' | 'unknown';
+export type MatchStatus = 'matched' | 'needs_selection' | 'not_found';
 
 export interface ProductMatch {
   product: CatalogProduct;
@@ -22,6 +23,17 @@ export interface ProductMatch {
   source: MatchSource;
   unitMismatch: boolean;
   unitWarning?: string;
+}
+
+export interface ProductSuggestion {
+  product: CatalogProduct;
+  score: number;
+}
+
+export interface ItemMatchAnalysis {
+  status: MatchStatus;
+  match: ProductMatch | null;
+  suggestions: ProductSuggestion[];
 }
 
 export function normalizeIikoName(name: string): string {
@@ -102,6 +114,81 @@ export class ProductCatalogMatcher {
     this.mappingStore = mappingStore;
   }
 
+  getAllProducts(): CatalogProduct[] {
+    return [...this.products];
+  }
+
+  scoreCandidateProduct(cand: CatalogProduct, queryTokens: string[], normQuery: string): { score: number; source: MatchSource } {
+    const candNorm = normalizeIikoName(cand.name);
+    if (candNorm === normQuery) {
+      return { score: 1.0, source: 'exact' };
+    }
+
+    const candTokens = tokenizeName(cand.name);
+    if (candTokens.length === 0) return { score: 0, source: 'fuzzy' };
+
+    let matchedWeight = 0;
+    let matchedCount = 0;
+
+    for (const qToken of queryTokens) {
+      let bestTokenScore = 0;
+
+      for (const cToken of candTokens) {
+        if (qToken === cToken) {
+          bestTokenScore = Math.max(bestTokenScore, 1.0);
+          break;
+        }
+
+        // Prefix matching (e.g. томат / томаты, requiring at least 3 chars for prefixes)
+        const minLen = Math.min(qToken.length, cToken.length);
+        const isNumeric = /^\d+$/.test(qToken) || /^\d+$/.test(cToken);
+        if (!isNumeric && minLen >= 3 && (qToken.startsWith(cToken) || cToken.startsWith(qToken)) && Math.abs(qToken.length - cToken.length) <= 3) {
+          bestTokenScore = Math.max(bestTokenScore, 0.9);
+          continue;
+        }
+
+        // Typo / Levenshtein
+        if (qToken.length >= 4 && cToken.length >= 4) {
+          const dist = levenshteinDistance(qToken, cToken);
+          if (dist === 1) {
+            bestTokenScore = Math.max(bestTokenScore, 0.9);
+          } else if (dist === 2 && (qToken.length >= 5 || cToken.length >= 5)) {
+            bestTokenScore = Math.max(bestTokenScore, 0.75);
+          }
+        }
+      }
+
+      if (bestTokenScore > 0) {
+        matchedWeight += bestTokenScore;
+        matchedCount++;
+      }
+    }
+
+    const coverage = matchedWeight / queryTokens.length;
+    if (coverage < 0.35) {
+      return { score: 0, source: 'fuzzy' };
+    }
+
+    const jaccard = matchedWeight / (candTokens.length + queryTokens.length - matchedWeight);
+    let score = (coverage * 0.65) + (jaccard * 0.35);
+
+    // Substring bonus if exact phrase is contained
+    if (candNorm.includes(normQuery)) {
+      score += 0.05;
+    }
+
+    // Bonus if first word (head noun) matched well
+    if (candTokens.length > 0 && queryTokens.length > 0) {
+      const headDist = levenshteinDistance(queryTokens[0], candTokens[0]);
+      if (headDist <= 1 || (headDist <= 2 && queryTokens[0].length >= 5)) {
+        score += 0.08;
+      }
+    }
+
+    const source: MatchSource = matchedCount === queryTokens.length && matchedWeight === queryTokens.length ? 'tokens' : 'fuzzy';
+    return { score, source };
+  }
+
   match(rawName: string, rawUnit?: string): ProductMatch | null {
     if (!rawName || !rawName.trim()) {
       return null;
@@ -155,76 +242,17 @@ export class ProductCatalogMatcher {
     let bestSource: MatchSource = 'tokens';
 
     for (const cand of this.products) {
-      const candNorm = normalizeIikoName(cand.name);
-      const candTokens = tokenizeName(cand.name);
-      if (candTokens.length === 0) continue;
-
-      let matchedWeight = 0;
-      let matchedCount = 0;
-
-      for (const qToken of queryTokens) {
-        let bestTokenScore = 0;
-
-        for (const cToken of candTokens) {
-          if (qToken === cToken) {
-            bestTokenScore = Math.max(bestTokenScore, 1.0);
-            break;
-          }
-
-          // Prefix matching (e.g. томат / томаты, requiring at least 3 chars for prefixes)
-          const minLen = Math.min(qToken.length, cToken.length);
-          const isNumeric = /^\d+$/.test(qToken) || /^\d+$/.test(cToken);
-          if (!isNumeric && minLen >= 3 && (qToken.startsWith(cToken) || cToken.startsWith(qToken)) && Math.abs(qToken.length - cToken.length) <= 3) {
-            bestTokenScore = Math.max(bestTokenScore, 0.9);
-            continue;
-          }
-
-          // Typo / Levenshtein
-          if (qToken.length >= 4 && cToken.length >= 4) {
-            const dist = levenshteinDistance(qToken, cToken);
-            if (dist === 1) {
-              bestTokenScore = Math.max(bestTokenScore, 0.9);
-            } else if (dist === 2 && (qToken.length >= 5 || cToken.length >= 5)) {
-              bestTokenScore = Math.max(bestTokenScore, 0.75);
-            }
-          }
-        }
-
-        if (bestTokenScore > 0) {
-          matchedWeight += bestTokenScore;
-          matchedCount++;
-        }
-      }
-
-      const coverage = matchedWeight / queryTokens.length;
-      if (coverage < 0.5) {
-        continue;
-      }
-
-      const jaccard = matchedWeight / (candTokens.length + queryTokens.length - matchedWeight);
-      let score = (coverage * 0.65) + (jaccard * 0.35);
-
-      // Substring bonus if exact phrase is contained
-      if (candNorm.includes(normQuery)) {
-        score += 0.05;
-      }
-
-      // Bonus if first word (head noun) matched well
-      if (candTokens.length > 0 && queryTokens.length > 0) {
-        const headDist = levenshteinDistance(queryTokens[0], candTokens[0]);
-        if (headDist <= 1 || (headDist <= 2 && queryTokens[0].length >= 5)) {
-          score += 0.08;
-        }
-      }
+      const { score, source } = this.scoreCandidateProduct(cand, queryTokens, normQuery);
+      if (score < 0.5) continue;
 
       if (score > bestScore) {
         bestScore = score;
         bestMatch = cand;
-        bestSource = matchedCount === queryTokens.length && matchedWeight === queryTokens.length ? 'tokens' : 'fuzzy';
+        bestSource = source;
       } else if (Math.abs(score - bestScore) < 0.001 && bestMatch) {
         // Tie-breaker: choose candidate whose token count is closer to query token count
         const currentDiff = Math.abs(tokenizeName(bestMatch.name).length - queryTokens.length);
-        const newDiff = Math.abs(candTokens.length - queryTokens.length);
+        const newDiff = Math.abs(tokenizeName(cand.name).length - queryTokens.length);
         if (newDiff < currentDiff) {
           bestMatch = cand;
         }
@@ -244,6 +272,121 @@ export class ProductCatalogMatcher {
     }
 
     return null;
+  }
+
+  findSuggestions(rawName: string, maxSuggestions = 3): ProductSuggestion[] {
+    if (!rawName || !rawName.trim()) {
+      return [];
+    }
+
+    const trimmed = rawName.trim();
+    const normQuery = normalizeIikoName(trimmed);
+    if (!normQuery) {
+      return [];
+    }
+
+    const suggestions: ProductSuggestion[] = [];
+    const seenIds = new Set<string>();
+
+    // 1. Check explicit mapping
+    if (this.mappingStore) {
+      const mapping = this.mappingStore.findProductMapping(trimmed) || this.mappingStore.findProductMapping(normQuery);
+      if (mapping) {
+        const found = this.products.find(p => (mapping.iikoProductId && p.id === mapping.iikoProductId) || normalizeIikoName(p.name) === normalizeIikoName(mapping.iikoProductName));
+        if (found) {
+          suggestions.push({ product: found, score: 1.0 });
+          seenIds.add(found.id);
+        }
+      }
+    }
+
+    // 2. Exact match
+    const exact = this.products.find(p => !seenIds.has(p.id) && normalizeIikoName(p.name) === normQuery);
+    if (exact) {
+      suggestions.push({ product: exact, score: 1.0 });
+      seenIds.add(exact.id);
+    }
+
+    // 3. Score other candidates
+    const queryTokens = tokenizeName(trimmed);
+    const scoredList: ProductSuggestion[] = [];
+
+    for (const cand of this.products) {
+      if (seenIds.has(cand.id)) continue;
+      const { score } = this.scoreCandidateProduct(cand, queryTokens, normQuery);
+      if (score >= 0.35) {
+        scoredList.push({ product: cand, score: Math.round(score * 100) / 100 });
+      }
+    }
+
+    // Sort scored candidates descending
+    scoredList.sort((a, b) => {
+      if (Math.abs(b.score - a.score) > 0.001) {
+        return b.score - a.score;
+      }
+      return a.product.name.length - b.product.name.length;
+    });
+
+    for (const sc of scoredList) {
+      if (!seenIds.has(sc.product.id)) {
+        suggestions.push(sc);
+        seenIds.add(sc.product.id);
+      }
+      if (suggestions.length >= maxSuggestions) break;
+    }
+
+    return suggestions.slice(0, maxSuggestions);
+  }
+
+  analyzeItem(rawName: string, rawUnit?: string, explicitName?: string): ItemMatchAnalysis {
+    if (!rawName || !rawName.trim()) {
+      return { status: 'not_found', match: null, suggestions: [] };
+    }
+
+    // 1. Explicit user selection / existing mapping name
+    if (explicitName && explicitName.trim()) {
+      const explicitNorm = normalizeIikoName(explicitName.trim());
+      const found = this.products.find(p => normalizeIikoName(p.name) === explicitNorm);
+      if (found) {
+        const unitCheck = checkUnitMismatch(rawUnit, found.unit);
+        const match: ProductMatch = {
+          product: found,
+          score: 1.0,
+          source: 'mapping',
+          unitMismatch: unitCheck.mismatch,
+          unitWarning: unitCheck.warning
+        };
+        const suggestions = this.findSuggestions(rawName, 3);
+        return { status: 'matched', match, suggestions };
+      }
+    }
+
+    // 2. Check regular match
+    const match = this.match(rawName, rawUnit);
+    const suggestions = this.findSuggestions(rawName, 3);
+
+    if (match) {
+      if (match.source === 'mapping' || match.source === 'exact') {
+        return { status: 'matched', match, suggestions };
+      }
+
+      // Check ambiguity: if there are 2 or more close candidates, do not guess — require user choice
+      if (suggestions.length >= 2 && (suggestions[0].score - suggestions[1].score <= 0.12)) {
+        return { status: 'needs_selection', match: null, suggestions };
+      }
+
+      if (match.score >= 0.88) {
+        return { status: 'matched', match, suggestions };
+      }
+
+      return { status: 'needs_selection', match, suggestions };
+    }
+
+    if (suggestions.length > 0 && suggestions[0].score >= 0.40) {
+      return { status: 'needs_selection', match: null, suggestions };
+    }
+
+    return { status: 'not_found', match: null, suggestions: [] };
   }
 
   saveMapping(rawName: string, product: CatalogProduct): void {

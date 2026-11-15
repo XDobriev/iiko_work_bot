@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { InvoiceData } from '../types/index.js';
-import { ProductCatalogMatcher, CatalogProduct, normalizeIikoName, tokenizeName } from './matcher.js';
+import { ProductCatalogMatcher, CatalogProduct, normalizeIikoName, tokenizeName, ProductMatch } from './matcher.js';
 import { InvoicesRepository } from '../db/invoices.repo.js';
 
 export interface IikoCreateInvoiceResult {
@@ -47,6 +47,9 @@ export class IikoClient {
   private cookie: string | null = null;
   private cookieExpiresAt = 0;
   private repo?: InvoicesRepository;
+  private cachedProducts: CatalogProduct[] | null = null;
+  private productsCachedAt = 0;
+  private readonly PRODUCTS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(repo?: InvoicesRepository) {
     this.url = config.iiko.url;
@@ -141,9 +144,71 @@ export class IikoClient {
     return (res.data || []).filter(s => !s.deleted);
   }
 
-  async getProducts(): Promise<CatalogProduct[]> {
-    const res = await this.request<CatalogProduct[]>('/api/documents/product/short_list');
-    return res.filter(p => !p.isDeleted && p.type !== 'MODIFIER');
+  clearProductsCache(): void {
+    this.cachedProducts = null;
+    this.productsCachedAt = 0;
+  }
+
+  private getFallbackProductsFromRepo(): CatalogProduct[] {
+    if (!this.repo) return [];
+    const known = this.repo.getKnownItems(200);
+    const mappings = this.repo.getAllProductMappings();
+    const fallback: CatalogProduct[] = [];
+    const seen = new Set<string>();
+
+    for (const m of mappings) {
+      const k = m.iiko_product_name.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        fallback.push({
+          id: m.iiko_product_id || `map-${m.id}`,
+          name: m.iiko_product_name,
+          unit: 'кг'
+        });
+      }
+    }
+
+    for (const name of known) {
+      const k = name.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        fallback.push({
+          id: `known-${fallback.length + 1}`,
+          name,
+          unit: 'кг'
+        });
+      }
+    }
+
+    return fallback;
+  }
+
+  async getProducts(forceRefresh = false): Promise<CatalogProduct[]> {
+    if (!forceRefresh && this.cachedProducts && Date.now() - this.productsCachedAt < this.PRODUCTS_CACHE_TTL_MS) {
+      return this.cachedProducts;
+    }
+
+    if (!this.isConfigured()) {
+      this.cachedProducts = this.getFallbackProductsFromRepo();
+      this.productsCachedAt = Date.now();
+      return this.cachedProducts;
+    }
+
+    try {
+      const res = await this.request<CatalogProduct[]>('/api/documents/product/short_list');
+      this.cachedProducts = res.filter(p => !p.isDeleted && p.type !== 'MODIFIER');
+      this.productsCachedAt = Date.now();
+      return this.cachedProducts;
+    } catch (err: any) {
+      console.warn('[IikoClient] Не удалось загрузить номенклатуру из iikoWeb, переключаемся на локальный кэш:', err?.message || err);
+      const fallback = this.getFallbackProductsFromRepo();
+      if (fallback.length > 0) {
+        this.cachedProducts = fallback;
+        this.productsCachedAt = Date.now();
+        return this.cachedProducts;
+      }
+      return this.cachedProducts || [];
+    }
   }
 
   private async getDefaultConceptionId(): Promise<string | undefined> {
@@ -253,18 +318,19 @@ export class IikoClient {
       const unitWarnings: string[] = [];
 
       for (const item of invoice.items) {
-        const match = matcher.match(item.name, item.unit);
-        if (!match) {
+        const analysis = matcher.analyzeItem(item.name, item.unit, item.iiko_product_name);
+        if (analysis.status !== 'matched' || !analysis.match) {
           unmatched.push(item.name);
           continue;
         }
 
+        const match = analysis.match;
         if (match.unitMismatch && match.unitWarning) {
           unitWarnings.push(match.unitWarning);
         }
 
-        // Persist confirmed / high-confidence mapping to SQLite product_mappings
-        if (this.repo && (match.source === 'exact' || match.source === 'tokens' || match.score >= 0.85)) {
+        // Persist confirmed mapping to SQLite product_mappings
+        if (this.repo && (match.source === 'mapping' || match.source === 'exact' || match.score >= 0.88)) {
           matcher.saveMapping(item.name, match.product);
         }
 
@@ -272,12 +338,22 @@ export class IikoClient {
         matched.push({ productId: match.product.id, qty: item.qty, price: item.price, sum });
       }
 
+      // Requirement: Block invoice creation in iiko if any item is unmatched
+      if (unmatched.length > 0) {
+        return {
+          success: false,
+          unmatched,
+          unitWarnings: unitWarnings.length ? unitWarnings : undefined,
+          message: `Создание накладной заблокировано: следующие позиции не сопоставлены с номенклатурой iiko: ${unmatched.join(', ')}. Выберите соответствие в Mini App перед отправкой.`
+        };
+      }
+
       if (!matched.length) {
         return {
           success: false,
           unmatched,
           unitWarnings: unitWarnings.length ? unitWarnings : undefined,
-          message: `Ни один товар не найден в номенклатуре iiko: ${unmatched.join(', ')}`
+          message: `Ни один товар не найден в номенклатуре iiko.`
         };
       }
 

@@ -80,11 +80,29 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
     // 6. GET /api/invoice/:id
     const invRes = await fetch(`${baseUrl}/api/invoice/${invoiceId}`);
     assert.equal(invRes.status, 200);
-    const invJson = await invRes.json() as { success: boolean; data: InvoiceData; knownItems: string[]; recentInvoices: Array<{ id: number }> };
+    const invJson = await invRes.json() as {
+      success: boolean;
+      data: InvoiceData;
+      knownItems: string[];
+      recentInvoices: Array<{ id: number }>;
+      catalogProducts: any[];
+      matcherAnalysis: any;
+    };
     assert.equal(invJson.success, true);
     assert.equal(invJson.data.supplier, 'ООО Мясокомбинат');
     assert.equal(invJson.data.items.length, 2);
     assert.ok(Array.isArray(invJson.recentInvoices));
+    assert.ok(Array.isArray(invJson.catalogProducts));
+    assert.ok(invJson.matcherAnalysis);
+    assert.ok(Array.isArray(invJson.matcherAnalysis.items));
+
+    // 6.1. GET /api/match-item
+    const matchItemRes = await fetch(`${baseUrl}/api/match-item?name=Говядина`);
+    assert.equal(matchItemRes.status, 200);
+    const matchItemJson = await matchItemRes.json() as { success: boolean; analysis: any };
+    assert.equal(matchItemJson.success, true);
+    assert.ok(matchItemJson.analysis);
+    assert.ok(matchItemJson.analysis.status);
 
     // 7. POST /api/invoice/:id (Edit via WebApp)
     const updatedData: InvoiceData = {

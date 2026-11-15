@@ -23,7 +23,10 @@ export const InvoiceItemSchema = z.object({
     if (s.includes('house') || s.includes('хоз')) return 'household';
     if (s.includes('kitchen') || s.includes('кухн')) return 'kitchen';
     return undefined;
-  }, z.enum(['kitchen', 'household']).optional())
+  }, z.enum(['kitchen', 'household']).optional()),
+  iiko_product_name: z.string().optional(),
+  iiko_product_id: z.string().optional(),
+  iikoMapping: z.string().optional()
 });
 
 export type InvoiceItem = z.infer<typeof InvoiceItemSchema>;
@@ -79,6 +82,8 @@ export interface InvoiceItemRecord {
   sum: number;
   unit?: string;
   warehouse?: WarehouseType;
+  iiko_product_name?: string | null;
+  iiko_product_id?: string | null;
   created_at: string;
 }
 

@@ -1,9 +1,11 @@
 import http from 'node:http';
+import { AddressInfo } from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InvoiceWorkflow } from '../workflow/invoice-workflow.js';
 import { InvoiceDataSchema } from '../types/index.js';
+import { ProductCatalogMatcher } from '../iiko/matcher.js';
 
 export interface WebAppServerInstance {
   server: http.Server;
@@ -98,6 +100,8 @@ export function startWebAppServer(
       const suppliers = repo.getKnownSuppliers(40);
       const mappings = repo.getAllProductMappings();
       const recentInvoices = workflow.getRecentInvoicesWithData(15);
+      const catalogProducts = await workflow.getCatalogProducts();
+      const matcherAnalysis = await workflow.getInvoiceMatcherAnalysis(invoiceId);
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
@@ -108,7 +112,9 @@ export function startWebAppServer(
         knownItems,
         suppliers,
         mappings,
-        recentInvoices
+        recentInvoices,
+        catalogProducts,
+        matcherAnalysis
       }));
       return;
     }
@@ -136,6 +142,8 @@ export function startWebAppServer(
       const suppliers = repo.getKnownSuppliers(40);
       const mappings = repo.getAllProductMappings();
       const recentInvoices = workflow.getRecentInvoicesWithData(15);
+      const catalogProducts = await workflow.getCatalogProducts();
+      const matcherAnalysis = await workflow.getInvoiceMatcherAnalysis(invoiceId);
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
@@ -146,8 +154,25 @@ export function startWebAppServer(
         knownItems,
         suppliers,
         mappings,
-        recentInvoices
+        recentInvoices,
+        catalogProducts,
+        matcherAnalysis
       }));
+      return;
+    }
+
+    // 5.1. GET /api/match-item (dynamic matching for query)
+    if (pathname === '/api/match-item' && req.method === 'GET') {
+      const name = parsedUrl.searchParams.get('name') || '';
+      const unit = parsedUrl.searchParams.get('unit') || undefined;
+      const explicit = parsedUrl.searchParams.get('explicit') || undefined;
+
+      const products = await workflow.getCatalogProducts();
+      const matcher = new ProductCatalogMatcher(products, workflow.getRepo());
+      const analysis = matcher.analyzeItem(name, unit, explicit);
+
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, analysis }));
       return;
     }
 
@@ -177,11 +202,17 @@ export function startWebAppServer(
           return;
         }
 
-        // Save optional mappings if provided
+        // Save mappings (honor explicit client mappings array if provided, e.g. checkbox selections)
         if (Array.isArray(json.mappings)) {
           for (const m of json.mappings) {
             if (m.rawName && m.iikoProductName) {
               workflow.saveProductMapping(m.rawName, m.iikoProductName, m.iikoProductId);
+            }
+          }
+        } else {
+          for (const item of parseResult.data.items) {
+            if (item.name && item.iiko_product_name) {
+              workflow.saveProductMapping(item.name, item.iiko_product_name, item.iiko_product_id);
             }
           }
         }
@@ -215,10 +246,12 @@ export function startWebAppServer(
       const knownItems = repo.getKnownItems(100);
       const suppliers = repo.getKnownSuppliers(50);
       const mappings = repo.getAllProductMappings();
+      const catalogProducts = await workflow.getCatalogProducts();
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         success: true,
+        catalogProducts,
         knownItems,
         suppliers,
         mappings
@@ -258,7 +291,10 @@ export function startWebAppServer(
 
   return {
     server,
-    port,
+    get port(): number {
+      const addr = server.address() as AddressInfo | null;
+      return addr?.port ?? port;
+    },
     stop: () =>
       new Promise<void>((resolve, reject) => {
         server.close((err) => {

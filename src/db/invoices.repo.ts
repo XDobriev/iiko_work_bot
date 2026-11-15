@@ -95,8 +95,8 @@ export class InvoicesRepository {
 
     const insertItem = this.db.prepare(`
       INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const item of data.items) {
@@ -110,7 +110,9 @@ export class InvoicesRepository {
         item.price,
         sum,
         item.unit || 'шт',
-        wh
+        wh,
+        item.iiko_product_name || null,
+        item.iiko_product_id || null
       );
     }
 
@@ -138,7 +140,9 @@ export class InvoicesRepository {
         price: it.price,
         sum: it.sum,
         unit: it.unit || undefined,
-        warehouse: (it.warehouse as WarehouseType) || classifyItemWarehouse(it.name, undefined, invoice.warehouse || 'kitchen')
+        warehouse: (it.warehouse as WarehouseType) || classifyItemWarehouse(it.name, undefined, invoice.warehouse || 'kitchen'),
+        iiko_product_name: it.iiko_product_name || undefined,
+        iiko_product_id: it.iiko_product_id || undefined
       })),
       total_written: invoice.total_written ?? null,
       model_used: invoice.model_used || undefined
@@ -193,8 +197,8 @@ export class InvoicesRepository {
 
     const insertItem = this.db.prepare(`
       INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const item of data.items) {
@@ -208,7 +212,9 @@ export class InvoicesRepository {
         item.price,
         sum,
         item.unit || 'шт',
-        wh
+        wh,
+        item.iiko_product_name || null,
+        item.iiko_product_id || null
       );
     }
 
