@@ -41,7 +41,11 @@ test('createInvoiceKeyboard strictly enforces HTTPS for Telegram web_app button'
 });
 
 test('createEditKeyboard embeds Mini App button when HTTPS is configured', () => {
-  // When config.webapp.url is not https (or empty)
-  const defaultKb = createEditKeyboard(42, false);
+  // When webAppUrl is empty or not https
+  const defaultKb = createEditKeyboard(42, false, '');
   assert.ok(!defaultKb.inline_keyboard.some(row => row.some(b => b.text.includes('Mini App'))));
+
+  // When webAppUrl is valid https
+  const httpsKb = createEditKeyboard(42, false, 'https://example.com/webapp');
+  assert.ok(httpsKb.inline_keyboard.some(row => row.some(b => b.text.includes('Mini App'))));
 });

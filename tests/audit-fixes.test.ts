@@ -330,14 +330,13 @@ test('P1.5: startWebAppServer blocks unauthorized API requests when requireAuth 
     items: [{ name: 'Продукт', qty: 1, price: 100, sum: 100, unit: 'шт' }]
   });
 
-  const TEST_PORT = 39820;
-  const webapp = startWebAppServer(workflow, TEST_PORT, {
+  const webapp = startWebAppServer(workflow, 0, {
     requireAuth: true,
     botToken: testToken
   });
 
   try {
-    const baseUrl = `http://localhost:${TEST_PORT}`;
+    const baseUrl = `http://localhost:${webapp.port}`;
 
     // 1. Health check is public
     const healthRes = await fetch(`${baseUrl}/health`);
@@ -481,4 +480,99 @@ test('P2.3: formatInvoiceMessage compacts huge invoices with 80 items within 409
   assert.ok(formattedCard.length <= 4096, `Expected length <= 4096, got ${formattedCard.length}`);
   assert.ok(formattedCard.includes('ОБЩИЙ ИТОГ:'));
   assert.ok(formattedCard.includes('Накладная #999'));
+});
+
+test('clampTelegramHtml cleanly strips broken HTML entity at cutoff boundary', () => {
+  // Craft a string where cutoff lands inside "&amp;"
+  const textBefore = 'A'.repeat(3929);
+  const input = `<pre>${textBefore}&amp;extra text that exceeds the limit</pre>`;
+  const clamped = clampTelegramHtml(input, 4000);
+
+  assert.ok(clamped.length <= 4096);
+  // Must not have dangling "&" or "&am" without semicolon
+  assert.doesNotMatch(clamped, /&[a-zA-Z0-9#]+(?![;a-zA-Z0-9#])/);
+  assert.ok(clamped.includes('</pre>'));
+});
+
+test('P1.5: CORS preflight allows X-Telegram-Init-Data and Content-Type', async () => {
+  const memDb = getDatabase(':memory:');
+  const repo = new InvoicesRepository(memDb);
+  const workflow = new InvoiceWorkflow({ repo });
+  const webapp = startWebAppServer(workflow, 0);
+
+  try {
+    const res = await fetch(`http://localhost:${webapp.port}/api/invoice/latest`, {
+      method: 'OPTIONS',
+      headers: {
+        'Origin': 'https://web.telegram.org',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'Content-Type, X-Telegram-Init-Data, Authorization'
+      }
+    });
+
+    assert.equal(res.status, 204);
+    const allowHeaders = res.headers.get('Access-Control-Allow-Headers') || '';
+    assert.ok(allowHeaders.includes('X-Telegram-Init-Data'), 'CORS must allow X-Telegram-Init-Data header');
+    assert.ok(allowHeaders.includes('Authorization'), 'CORS must allow Authorization header');
+  } finally {
+    await webapp.stop();
+  }
+});
+
+test('P1.5: validateTelegramInitData rejects initData with missing auth_date', () => {
+  const testBotToken = '123456789:ABCdefGHIjklMNOpqrSTUvwxYZ_test';
+  const params: Record<string, string> = {
+    query_id: 'AAHdF6IQAAAAAN0XohD9e8_y',
+    user: JSON.stringify({ id: 12345 })
+  };
+  const entries = Object.entries(params).sort((a, b) => a[0].localeCompare(b[0]));
+  const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(testBotToken).digest();
+  const hash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+  const urlParams = new URLSearchParams(params);
+  urlParams.set('hash', hash);
+
+  const res = validateTelegramInitData(urlParams.toString(), testBotToken);
+  assert.equal(res.isValid, false);
+  assert.match(res.error || '', /auth_date parameter missing/);
+});
+
+test('P1.5: startWebAppServer rejects initData with no user when allowedUserIds is configured', async () => {
+  const memDb = getDatabase(':memory:');
+  const repo = new InvoicesRepository(memDb);
+  const workflow = new InvoiceWorkflow({ repo });
+  const testToken = '11223344:TEST_BOT_TOKEN';
+
+  const webapp = startWebAppServer(workflow, 0, {
+    requireAuth: true,
+    botToken: testToken
+  });
+
+  try {
+    // Generate valid initData but without user object
+    const date = Math.floor(Date.now() / 1000);
+    const params: Record<string, string> = {
+      auth_date: String(date),
+      query_id: 'AAHdF6IQAAAAAN0XohD9e8_y'
+    };
+    const entries = Object.entries(params).sort((a, b) => a[0].localeCompare(b[0]));
+    const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(testToken).digest();
+    const hash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    const urlParams = new URLSearchParams(params);
+    urlParams.set('hash', hash);
+
+    const res = await fetch(`http://localhost:${webapp.port}/api/invoice/latest`, {
+      headers: {
+        'Authorization': `tma ${urlParams.toString()}`
+      }
+    });
+
+    if (config.telegram.allowedUserIds.length > 0) {
+      assert.equal(res.status, 403, 'Must return 403 Forbidden when allowedUserIds is set and user is missing');
+    }
+  } finally {
+    await webapp.stop();
+  }
 });

@@ -121,7 +121,11 @@ export class InvoicesRepository {
       this.db.exec('COMMIT');
       return { invoiceId, totalCalculated };
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore if already aborted
+      }
       throw err;
     }
   }
@@ -200,7 +204,11 @@ export class InvoicesRepository {
       );
 
       if (res.changes === 0) {
-        this.db.exec('ROLLBACK');
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          // ignore if already aborted
+        }
         return false;
       }
 
@@ -233,7 +241,11 @@ export class InvoicesRepository {
       this.db.exec('COMMIT');
       return true;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore if already aborted
+      }
       throw err;
     }
   }
@@ -353,7 +365,11 @@ export class InvoicesRepository {
       this.db.exec('COMMIT');
       return res.changes > 0;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore if already aborted
+      }
       throw err;
     }
   }
@@ -390,7 +406,11 @@ export class InvoicesRepository {
       this.db.exec('COMMIT');
       return newWarehouse;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // ignore if already aborted
+      }
       throw err;
     }
   }

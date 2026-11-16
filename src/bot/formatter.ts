@@ -27,6 +27,9 @@ export function clampTelegramHtml(html: string, maxLen = 4000): string {
     sliced = sliced.slice(0, lastLt);
   }
 
+  // If sliced in the middle of an HTML entity like "&amp", remove the partial entity
+  sliced = sliced.replace(/&[a-zA-Z0-9#]*$/, '');
+
   // Balance tags
   const openTags: string[] = [];
   const tagRegex = /<\/?([a-zA-Z0-9]+)(?:\s+[^>]*)?>/g;

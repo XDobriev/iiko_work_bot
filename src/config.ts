@@ -107,6 +107,6 @@ export const config: Config = {
   webapp: {
     enabled: process.env.WEBAPP_ENABLED !== 'false',
     port: parseInt(process.env.WEBAPP_PORT || process.env.PORT || '3000', 10) || 3000,
-    url: normalizeWebappUrl(process.env.WEBAPP_URL)
+    url: normalizeWebappUrl(process.env.WEBAPP_URL || 'https://iiko-bot-khamzatd.mia0.amvera.tech')
   }
 };
