@@ -39,14 +39,18 @@ export function validateTelegramInitData(
       return { isValid: false, error: 'hash parameter missing' };
     }
 
-    // Check auth_date if present
+    // Check auth_date is required per Telegram WebApp specification
     const authDateStr = params.get('auth_date');
-    if (authDateStr) {
-      const authDate = parseInt(authDateStr, 10);
-      const now = Math.floor(Date.now() / 1000);
-      if (maxAgeSeconds > 0 && (now - authDate > maxAgeSeconds || authDate > now + 300)) {
-        return { isValid: false, error: 'initData has expired' };
-      }
+    if (!authDateStr) {
+      return { isValid: false, error: 'auth_date parameter missing' };
+    }
+    const authDate = parseInt(authDateStr, 10);
+    if (isNaN(authDate)) {
+      return { isValid: false, error: 'invalid auth_date parameter' };
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (maxAgeSeconds > 0 && (now - authDate > maxAgeSeconds || authDate > now + 300)) {
+      return { isValid: false, error: 'initData has expired' };
     }
 
     // Sort all keys except hash alphabetically
@@ -162,7 +166,7 @@ export function startWebAppServer(
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Telegram-Init-Data');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -213,8 +217,9 @@ export function startWebAppServer(
         }
 
         const allowedIds = config.telegram.allowedUserIds;
-        if (allowedIds.length > 0 && authResult.user?.id) {
-          if (!allowedIds.includes(authResult.user.id)) {
+        if (allowedIds.length > 0) {
+          const userId = authResult.user?.id;
+          if (!userId || !allowedIds.includes(userId)) {
             res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify({ success: false, message: 'Доступ ограничен: пользователь не входит в список разрешенных' }));
             return;

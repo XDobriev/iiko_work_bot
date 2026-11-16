@@ -30,7 +30,7 @@ export function createInvoiceKeyboard(
     .text('❌ Отклонить', `reject:${invoiceId}`)
     .row();
 
-  const rawUrl = webAppUrl || config.webapp.url;
+  const rawUrl = webAppUrl !== undefined ? webAppUrl : config.webapp.url;
   const isHttps = Boolean(rawUrl && rawUrl.startsWith('https://'));
   if (isHttps) {
     const fullUrl = rawUrl.includes('?') ? `${rawUrl}&invoiceId=${invoiceId}` : `${rawUrl}?invoiceId=${invoiceId}`;
@@ -58,9 +58,9 @@ export function createInvoiceKeyboard(
   return kb;
 }
 
-export function createEditKeyboard(invoiceId: number, canUndo = false): InlineKeyboard {
+export function createEditKeyboard(invoiceId: number, canUndo = false, webAppUrl?: string): InlineKeyboard {
   const kb = new InlineKeyboard();
-  const rawUrl = config.webapp.url;
+  const rawUrl = webAppUrl !== undefined ? webAppUrl : config.webapp.url;
   if (rawUrl && rawUrl.startsWith('https://')) {
     const fullUrl = rawUrl.includes('?') ? `${rawUrl}&invoiceId=${invoiceId}` : `${rawUrl}?invoiceId=${invoiceId}`;
     kb.webApp('📱 Открыть в Mini App', fullUrl).row();

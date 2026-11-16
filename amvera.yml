@@ -9,4 +9,5 @@ build:
 
 run:
   persistenceMount: /data
+  containerPort: 3000
   command: npm start

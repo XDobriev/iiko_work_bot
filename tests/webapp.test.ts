@@ -29,11 +29,10 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
   const { invoiceId } = repo.saveInvoice(initialData);
 
   // Start webapp on random free port with onInvoiceUpdated callback
-  const TEST_PORT = 39485;
   let updatedInvoiceIdFromCallback: number | null = null;
   let callbackCardText: string | null = null;
 
-  const webapp = startWebAppServer(workflow, TEST_PORT, {
+  const webapp = startWebAppServer(workflow, 0, {
     onInvoiceUpdated: (invId, cardText) => {
       updatedInvoiceIdFromCallback = invId;
       callbackCardText = cardText;
@@ -41,7 +40,7 @@ test('WebApp Server: end-to-end API, static serving, and CORS', async () => {
   });
 
   try {
-    const baseUrl = `http://localhost:${TEST_PORT}`;
+    const baseUrl = `http://localhost:${webapp.port}`;
 
     // 1. Health Check
     const healthRes = await fetch(`${baseUrl}/health`);

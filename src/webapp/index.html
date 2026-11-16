@@ -733,6 +733,26 @@
       tg.ready();
       tg.expand();
 
+      // Telegram BackButton: standard navigation in Mini Apps
+      try {
+        if (tg.BackButton) {
+          tg.BackButton.show();
+          tg.BackButton.onClick(() => {
+            if (isDirty) {
+              if (typeof tg.showConfirm === 'function') {
+                tg.showConfirm('Есть несохраненные изменения. Закрыть редактор?', (confirmed) => {
+                  if (confirmed) tg.close();
+                });
+              } else if (confirm('Есть несохраненные изменения. Закрыть редактор?')) {
+                tg.close();
+              }
+            } else {
+              tg.close();
+            }
+          });
+        }
+      } catch (e) {}
+
       // Telegram Mini Apps 2.0: Fullscreen mode
       try {
         if (typeof tg.requestFullscreen === 'function') {
@@ -1547,10 +1567,12 @@
     }
 
     // Bind Telegram MainButton if running inside Telegram client
-    if (tg?.MainButton && tg.initData) {
-      tg.MainButton.onClick(saveInvoice);
-      const fallbackBar = document.getElementById('fallback-bottom-bar');
-      if (fallbackBar) fallbackBar.style.display = 'none';
+    if (tg?.MainButton) {
+      try { tg.MainButton.onClick(saveInvoice); } catch (e) {}
+      if (tg.initData) {
+        const fallbackBar = document.getElementById('fallback-bottom-bar');
+        if (fallbackBar) fallbackBar.style.display = 'none';
+      }
     }
 
     // Delegated click handler for quick suggestion chips
@@ -1632,8 +1654,9 @@
           isDirty = false;
           renderItems();
         } else {
+          const errJson = await res.json().catch(() => ({}));
           document.getElementById('invoice-id-display').innerText = `#?`;
-          showToast('Накладная не найдена', '⚠️');
+          showToast(errJson.message || 'Накладная не найдена', '⚠️');
         }
       } catch (err) {
         console.warn('Ошибка загрузки данных накладной:', err);

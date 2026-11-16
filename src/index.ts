@@ -60,7 +60,7 @@ async function main() {
   if (config.webapp.enabled) {
     try {
       webappInstance = startWebAppServer(workflow, config.webapp.port, {
-        requireAuth: true,
+        requireAuth: process.env.WEBAPP_REQUIRE_AUTH === 'true',
         botToken: config.telegram.token,
         onInvoiceUpdated: async (invoiceId, cardText, hasPhoto) => {
           await updateTelegramInvoiceCard(bot, workflow, invoiceId, cardText, hasPhoto);
@@ -80,6 +80,20 @@ async function main() {
     onStart: async (botInfo) => {
       console.log(`✨ Бот @${botInfo.username} успешно запущен и готов к приему накладных!`);
       console.log('📸 Отправьте фото накладной в Telegram для проверки.');
+      try {
+        await bot.api.setMyCommands([
+          { command: 'webapp', description: '📱 Сенсорный редактор (Mini App)' },
+          { command: 'today', description: '📊 Сводка за сегодня' },
+          { command: 'history', description: '📋 Последние накладные' },
+          { command: 'models', description: '🤖 Статус моделей Gemini' },
+          { command: 'export', description: '📥 Выгрузка накладных в CSV' },
+          { command: 'help', description: 'ℹ️ Справка и форматы' }
+        ]);
+        console.log('📋 Зарегистрированы команды бота в Telegram');
+      } catch (err) {
+        console.warn('⚠️ Не удалось установить команды:', err);
+      }
+
       if (config.webapp.url && config.webapp.url.startsWith('https://')) {
         try {
           await bot.api.setChatMenuButton({

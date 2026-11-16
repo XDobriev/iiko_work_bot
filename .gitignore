@@ -33,4 +33,5 @@ Thumbs.db
 temp/
 tmp/
 .playwright-mcp/
+cloudflared.exe
 
