@@ -8,7 +8,7 @@ import { startWebAppServer } from '../webapp/server.js';
 import { ProductCatalogMatcher } from '../iiko/matcher.js';
 import { MockIikoAccountingGateway } from '../iiko/accounting-gateway.js';
 import { InvoiceData } from '../types/index.js';
-import { chromium } from 'playwright';
+import { chromium, type Browser, type Page } from 'playwright';
 
 async function runScenarioWalkthrough() {
   console.log('================================================================');
@@ -90,13 +90,13 @@ async function runScenarioWalkthrough() {
   const miniAppUrl = `http://127.0.0.1:${webapp.port}/?invoiceId=${invoiceId}`;
   console.log(`   🌐 Сервер Mini App запущен на порту ${webapp.port}`);
 
-  let browser: any;
+  let browser: Browser;
   try {
     browser = await chromium.launch({ headless: true, channel: 'msedge' });
   } catch {
     browser = await chromium.launch({ headless: true, channel: 'chrome' });
   }
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } }); // Размер экрана iPhone 14
+  const page: Page = await browser.newPage({ viewport: { width: 390, height: 844 } }); // Размер экрана iPhone 14
 
   try {
     // 2.1 Навигация в редактор
@@ -105,8 +105,8 @@ async function runScenarioWalkthrough() {
     console.log('   ✅ Mini App успешно загрузился в Chromium, карточки товаров отрисованы.');
 
     // 2.2 Проверка отрисовки данных
-    const renderedSupplier = await page.$eval('#supplier-input', (el: any) => el.value);
-    const cardCount = await page.$$eval('.item-card', (cards: any[]) => cards.length);
+    const renderedSupplier = await page.$eval('#supplier-input', (el) => (el as { value: string }).value);
+    const cardCount = await page.$$eval('.item-card', (cards) => cards.length);
     console.log(`   🔎 В интерфейсе: Поставщик="${renderedSupplier}", Карточек товаров=${cardCount}`);
 
     // 2.3 Изменение данных через сенсорный UI
@@ -131,7 +131,7 @@ async function runScenarioWalkthrough() {
     // 2.4 Сохранение накладной
     await page.click('.btn-save-main');
     await page.waitForSelector('#toast.show', { timeout: 4000 });
-    const toastText = await page.$eval('#toast-text', (el: any) => el.innerText);
+    const toastText = await page.$eval('#toast-text', (el) => (el as { innerText: string }).innerText);
     console.log(`   🔔 Всплывающее уведомление Mini App: "${toastText}"`);
 
     // 2.5 Проверка сохранения в базе SQLite
@@ -225,14 +225,17 @@ async function runScenarioWalkthrough() {
   const p2 = workflow.confirmAndSync(invoiceId);
 
   const [syncRes1, syncRes2] = await Promise.all([p1, p2]);
-  console.log(`   Кликер 1: результат=${syncRes1.success ? 'УСПЕХ ✅' : 'ОТКЛОНЕН ❌'} (${syncRes1.message})`);
-  console.log(`   Кликер 2 (повторный клик во время обработки): результат=${syncRes2.success ? 'УСПЕХ' : 'БЛОКИРОВАН ЗАЩИТОЙ ✅'} (${(syncRes2 as any).error || syncRes2.message})`);
+  console.log(`   Кликер 1: результат=${syncRes1.success ? 'УСПЕХ ✅' : 'ОТКЛОНЕН ❌'} (${syncRes1.message || ''})`);
+  console.log(`   Кликер 2 (повторный клик во время обработки): результат=${syncRes2.success ? 'УСПЕХ' : 'БЛОКИРОВАН ЗАЩИТОЙ ✅'} (${syncRes2.message || ''})`);
 
-  const splitSummary = (syncRes1 as any).splitSummary;
-  if (splitSummary) {
+  if (syncRes1.documentNumbers) {
     console.log(`      ✨ Смешанная накладная автоматически разделена на 2 черновика:`);
-    console.log(`         1. Кухня: #${splitSummary.kitchenDoc} (${splitSummary.kitchenTotal} ₽)`);
-    console.log(`         2. Хозяйство: #${splitSummary.householdDoc} (${splitSummary.householdTotal} ₽)`);
+    if (syncRes1.documentNumbers.kitchen) {
+      console.log(`         1. Кухня: #${syncRes1.documentNumbers.kitchen}`);
+    }
+    if (syncRes1.documentNumbers.household) {
+      console.log(`         2. Хозяйство: #${syncRes1.documentNumbers.household}`);
+    }
   }
 
   // Шаг 5.4: Блокировка редактирования синхронизированной накладной

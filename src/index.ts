@@ -60,8 +60,9 @@ async function main() {
   if (config.webapp.enabled) {
     try {
       webappInstance = startWebAppServer(workflow, config.webapp.port, {
-        requireAuth: process.env.WEBAPP_REQUIRE_AUTH === 'true',
+        requireAuth: config.webapp.requireAuth,
         botToken: config.telegram.token,
+        allowedUserIds: config.telegram.allowedUserIds,
         onInvoiceUpdated: async (invoiceId, cardText, hasPhoto) => {
           await updateTelegramInvoiceCard(bot, workflow, invoiceId, cardText, hasPhoto);
         }

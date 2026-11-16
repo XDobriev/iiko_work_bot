@@ -546,7 +546,8 @@ test('P1.5: startWebAppServer rejects initData with no user when allowedUserIds 
 
   const webapp = startWebAppServer(workflow, 0, {
     requireAuth: true,
-    botToken: testToken
+    botToken: testToken,
+    allowedUserIds: [999999]
   });
 
   try {
@@ -569,9 +570,7 @@ test('P1.5: startWebAppServer rejects initData with no user when allowedUserIds 
       }
     });
 
-    if (config.telegram.allowedUserIds.length > 0) {
-      assert.equal(res.status, 403, 'Must return 403 Forbidden when allowedUserIds is set and user is missing');
-    }
+    assert.equal(res.status, 403, 'Must return 403 Forbidden when allowedUserIds is set and user is missing');
   } finally {
     await webapp.stop();
   }

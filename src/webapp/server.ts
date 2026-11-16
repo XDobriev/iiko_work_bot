@@ -153,6 +153,7 @@ export interface WebAppServerOptions {
   onInvoiceUpdated?: (invoiceId: number, cardText: string, hasPhoto: boolean) => Promise<void> | void;
   botToken?: string;
   requireAuth?: boolean;
+  allowedUserIds?: number[];
 }
 
 export function startWebAppServer(
@@ -216,7 +217,7 @@ export function startWebAppServer(
           return;
         }
 
-        const allowedIds = config.telegram.allowedUserIds;
+        const allowedIds = options?.allowedUserIds !== undefined ? options.allowedUserIds : config.telegram.allowedUserIds;
         if (allowedIds.length > 0) {
           const userId = authResult.user?.id;
           if (!userId || !allowedIds.includes(userId)) {
