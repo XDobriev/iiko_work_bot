@@ -436,8 +436,9 @@ export function startWebAppServer(
     res.end(JSON.stringify({ error: 'Endpoint not found' }));
   });
 
-  server.listen(port, () => {
-    // Listening started
+  const host = process.env.HOST || '0.0.0.0';
+  server.listen(port, host, () => {
+    // Listening started on 0.0.0.0
   });
 
   return {
