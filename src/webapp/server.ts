@@ -437,9 +437,15 @@ export function startWebAppServer(
   });
 
   const host = process.env.HOST || '0.0.0.0';
-  server.listen(port, host, () => {
-    // Listening started on 0.0.0.0
-  });
+  if (port === 0) {
+    server.listen(0, () => {
+      // Listening on OS ephemeral port
+    });
+  } else {
+    server.listen(port, host, () => {
+      // Listening on 0.0.0.0
+    });
+  }
 
   return {
     server,

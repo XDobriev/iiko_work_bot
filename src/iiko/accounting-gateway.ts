@@ -9,7 +9,8 @@ import {
   CatalogProduct,
   ProductCatalogMatcher,
   MatchStatus,
-  ProductSuggestion
+  ProductSuggestion,
+  ProductMappingStore
 } from './matcher.js';
 import { partitionItemsByWarehouse } from '../workflow/warehouse-classifier.js';
 import { InvoicesRepository } from '../db/invoices.repo.js';
@@ -269,13 +270,15 @@ export class LiveIikoAccountingGateway implements IIkoAccountingGateway {
  */
 export class MockIikoAccountingGateway implements IIkoAccountingGateway {
   private products: CatalogProduct[];
+  private mappingStore?: ProductMappingStore;
   public syncCalls: InvoiceDomainRecord[] = [];
   public shouldFail: boolean = false;
   public failMessage?: string;
   public partialSplitFail: boolean = false;
 
-  constructor(products: CatalogProduct[] = []) {
+  constructor(products: CatalogProduct[] = [], mappingStore?: ProductMappingStore) {
     this.products = products;
+    this.mappingStore = mappingStore;
   }
 
   async getProducts(): Promise<CatalogProduct[]> {
@@ -285,7 +288,7 @@ export class MockIikoAccountingGateway implements IIkoAccountingGateway {
   clearCache(): void {}
 
   async analyzeNomenclature(items: InvoiceItem[]): Promise<NomenclatureAnalysisResult> {
-    const matcher = new ProductCatalogMatcher(this.products);
+    const matcher = new ProductCatalogMatcher(this.products, this.mappingStore);
     let hasUnmatched = false;
     const unmatchedNames: string[] = [];
 
