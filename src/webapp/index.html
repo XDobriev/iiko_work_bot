@@ -732,18 +732,31 @@
     if (tg) {
       tg.ready();
       tg.expand();
+
+      // Telegram Mini Apps 2.0: Fullscreen mode
+      try {
+        if (typeof tg.requestFullscreen === 'function') {
+          tg.requestFullscreen();
+        }
+      } catch (e) {}
+
+      // Telegram Mini Apps 2.0: Disable accidental swipe-down closure
       try {
         if (typeof tg.disableVerticalSwipes === 'function') {
           tg.disableVerticalSwipes();
         }
       } catch (e) {}
 
+      // Theme colors & bottom bar
       try {
         if (tg.themeParams?.bg_color) {
           document.documentElement.style.setProperty('--bg-color', tg.themeParams.bg_color);
           if (typeof tg.setHeaderColor === 'function') {
             tg.setHeaderColor(tg.themeParams.bg_color);
           }
+        }
+        if (typeof tg.setBottomBarColor === 'function' && tg.themeParams?.secondary_bg_color) {
+          tg.setBottomBarColor(tg.themeParams.secondary_bg_color);
         }
       } catch (e) {}
     }
@@ -1489,7 +1502,13 @@
       try {
         const res = await fetch(`/api/invoice/${invoiceId}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(tg?.initData ? {
+              'Authorization': 'tma ' + tg.initData,
+              'X-Telegram-Init-Data': tg.initData
+            } : {})
+          },
           body: JSON.stringify(payload)
         });
 
@@ -1560,7 +1579,12 @@
     async function loadInvoiceData(id) {
       try {
         const url = id ? `/api/invoice/${id}` : '/api/invoice/latest';
-        const res = await fetch(url);
+        const res = await fetch(url, {
+          headers: tg?.initData ? {
+            'Authorization': 'tma ' + tg.initData,
+            'X-Telegram-Init-Data': tg.initData
+          } : {}
+        });
         if (res.ok) {
           const json = await res.json();
           if (json.invoiceId) {

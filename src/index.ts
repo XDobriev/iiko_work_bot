@@ -3,7 +3,7 @@ import { getDatabase } from './db/database.js';
 import { createBot, updateTelegramInvoiceCard } from './bot/bot.js';
 import { InvoiceWorkflow } from './workflow/invoice-workflow.js';
 import { startWebAppServer, WebAppServerInstance } from './webapp/server.js';
-import { GeminiAutopilot } from './gemini/autopilot.js';
+import { GeminiAutopilot } from './gemini/model-selection.js';
 
 async function main() {
   console.log('==============================================');
@@ -60,12 +60,14 @@ async function main() {
   if (config.webapp.enabled) {
     try {
       webappInstance = startWebAppServer(workflow, config.webapp.port, {
+        requireAuth: true,
+        botToken: config.telegram.token,
         onInvoiceUpdated: async (invoiceId, cardText, hasPhoto) => {
           await updateTelegramInvoiceCard(bot, workflow, invoiceId, cardText, hasPhoto);
         }
       });
       console.log(`🌐 Telegram Mini App сервер запущен: http://localhost:${config.webapp.port}/webapp`);
-      if (config.webapp.url) {
+      if (config.webapp.url && config.webapp.url.startsWith('https://')) {
         console.log(`📱 Внешний Mini App URL: ${config.webapp.url}`);
       }
     } catch (err) {
@@ -78,7 +80,7 @@ async function main() {
     onStart: async (botInfo) => {
       console.log(`✨ Бот @${botInfo.username} успешно запущен и готов к приему накладных!`);
       console.log('📸 Отправьте фото накладной в Telegram для проверки.');
-      if (config.webapp.url) {
+      if (config.webapp.url && config.webapp.url.startsWith('https://')) {
         try {
           await bot.api.setChatMenuButton({
             menu_button: {

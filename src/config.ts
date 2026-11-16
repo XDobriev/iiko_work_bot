@@ -11,6 +11,9 @@ export interface Config {
     photoModels: string[];
     voiceModels: string[];
     complexModels: string[];
+    timeoutMs: number;
+    stalledTimeoutMs: number;
+    pingTimeoutMs: number;
   };
   telegram: {
     token: string;
@@ -68,6 +71,15 @@ const primaryModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 
 const generalModels = parseModelList(process.env.GEMINI_MODELS, primaryModel);
 
+export const normalizeWebappUrl = (raw?: string): string => {
+  if (!raw || !raw.trim()) return '';
+  let url = raw.trim().replace(/\/+$/, '');
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  return url;
+};
+
 export const config: Config = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
@@ -75,7 +87,10 @@ export const config: Config = {
     models: generalModels,
     photoModels: parseModelList(process.env.GEMINI_MODELS_PHOTO, undefined, [primaryModel, ...generalModels]),
     voiceModels: parseModelList(process.env.GEMINI_MODELS_VOICE, undefined, ['gemini-3.5-transcribe', 'gemini-3.5-flash-lite', 'gemini-3.5-flash']),
-    complexModels: parseModelList(process.env.GEMINI_MODELS_COMPLEX, undefined, ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite'])
+    complexModels: parseModelList(process.env.GEMINI_MODELS_COMPLEX, undefined, ['gemini-3.5-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite']),
+    timeoutMs: parseInt(process.env.GEMINI_TIMEOUT_MS || '120000', 10) || 120000,
+    stalledTimeoutMs: parseInt(process.env.GEMINI_STALLED_TIMEOUT_MS || '25000', 10) || 25000,
+    pingTimeoutMs: parseInt(process.env.GEMINI_PING_TIMEOUT_MS || '35000', 10) || 35000
   },
   telegram: {
     token: process.env.TELEGRAM_TOKEN || '',
@@ -90,8 +105,8 @@ export const config: Config = {
     path: path.resolve(process.cwd(), process.env.DATABASE_PATH || './data/invoices.db')
   },
   webapp: {
-    enabled: process.env.WEBAPP_ENABLED === 'true',
+    enabled: process.env.WEBAPP_ENABLED !== 'false',
     port: parseInt(process.env.WEBAPP_PORT || process.env.PORT || '3000', 10) || 3000,
-    url: (process.env.WEBAPP_URL || '').replace(/\/+$/, '')
+    url: normalizeWebappUrl(process.env.WEBAPP_URL)
   }
 };

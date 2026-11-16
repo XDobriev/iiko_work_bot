@@ -46,6 +46,8 @@ export class IikoClient {
   private password?: string;
   private cookie: string | null = null;
   private cookieExpiresAt = 0;
+  private authPromise: Promise<void> | null = null;
+  private invoiceMutex: Promise<void> = Promise.resolve();
   private repo?: InvoicesRepository;
   private cachedProducts: CatalogProduct[] | null = null;
   private productsCachedAt = 0;
@@ -63,31 +65,55 @@ export class IikoClient {
   }
 
   private async authenticate(): Promise<void> {
-    if (!this.password) {
-      throw new Error('IIKO_PASSWORD не задан в конфигурации.');
+    if (this.authPromise) {
+      return this.authPromise;
     }
 
-    const res = await fetch(`${this.url}/api/auth/login`, {
-      method: 'POST',
-      headers: { ...BASE_HEADERS },
-      body: JSON.stringify({ login: this.login, password: this.password })
+    this.authPromise = (async () => {
+      if (!this.password) {
+        throw new Error('IIKO_PASSWORD не задан в конфигурации.');
+      }
+
+      const res = await fetch(`${this.url}/api/auth/login`, {
+        method: 'POST',
+        headers: { ...BASE_HEADERS },
+        body: JSON.stringify({ login: this.login, password: this.password })
+      });
+
+      const bodyText = await res.text();
+      if (!res.ok) {
+        throw new Error(`Ошибка авторизации iiko (${res.status}): ${bodyText.slice(0, 300)}`);
+      }
+
+      const cookies = res.headers
+        .getSetCookie()
+        .map(c => c.split(';')[0])
+        .filter(c => c.startsWith('PHPSESSID=') || c.startsWith('by='));
+      if (!cookies.length) {
+        throw new Error('iiko не вернул сессионную cookie после входа.');
+      }
+
+      this.cookie = cookies.join('; ');
+      this.cookieExpiresAt = Date.now() + SESSION_TTL_MS;
+    })().finally(() => {
+      this.authPromise = null;
     });
 
-    const bodyText = await res.text();
-    if (!res.ok) {
-      throw new Error(`Ошибка авторизации iiko (${res.status}): ${bodyText.slice(0, 300)}`);
-    }
+    return this.authPromise;
+  }
 
-    const cookies = res.headers
-      .getSetCookie()
-      .map(c => c.split(';')[0])
-      .filter(c => c.startsWith('PHPSESSID=') || c.startsWith('by='));
-    if (!cookies.length) {
-      throw new Error('iiko не вернул сессионную cookie после входа.');
+  private async withInvoiceLock<T>(fn: () => Promise<T>): Promise<T> {
+    const currentLock = this.invoiceMutex;
+    let release: () => void;
+    this.invoiceMutex = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    await currentLock;
+    try {
+      return await fn();
+    } finally {
+      release!();
     }
-
-    this.cookie = cookies.join('; ');
-    this.cookieExpiresAt = Date.now() + SESSION_TTL_MS;
   }
 
   private async request<T = any>(path: string, init?: { method?: string; body?: unknown }, retried = false): Promise<T> {
@@ -277,165 +303,165 @@ export class IikoClient {
   }
 
   async createInvoice(invoice: InvoiceData): Promise<IikoCreateInvoiceResult> {
-    // If not configured, run in safe Mock/Dry-run mode
-    if (!this.isConfigured()) {
-      const mockDocNum = `MOCK-${Date.now().toString().slice(-6)}`;
-      return {
-        success: true,
-        isMock: true,
-        documentNumber: mockDocNum,
-        documentId: `mock-guid-${Date.now()}`,
-        message: 'Демо-режим (пароль iiko не был указан в .env, накладная успешно зафиксирована локально)'
-      };
-    }
-
-    try {
-      const [suppliers, storages, products, conceptionId] = await Promise.all([
-        this.getSuppliers(),
-        this.getStorages(),
-        this.getProducts(),
-        this.getDefaultConceptionId()
-      ]);
-
-      const supplier = this.findEntityByName(suppliers, invoice.supplier || '');
-      if (!supplier) {
+    return this.withInvoiceLock(async () => {
+      // If not configured, run in safe Mock/Dry-run mode
+      if (!this.isConfigured()) {
+        const mockDocNum = `MOCK-${Date.now().toString().slice(-6)}`;
         return {
-          success: false,
-          message: `Поставщик «${invoice.supplier}» не найден в iiko. Добавьте его в iikoWeb или поправьте название накладной.`
+          success: true,
+          isMock: true,
+          documentNumber: mockDocNum,
+          documentId: `mock-guid-${Date.now()}`,
+          message: 'Демо-режим (пароль iiko не был указан в .env, накладная успешно зафиксирована локально)'
         };
       }
 
-      const keywords = invoice.warehouse === 'household' ? ['хоз', 'household'] : ['кухн', 'kitchen'];
-      const storage =
-        storages.find(s => keywords.some(k => s.name.toLowerCase().includes(k))) || storages[0];
-      if (!storage) {
-        return { success: false, message: 'В iiko не найдено ни одного склада.' };
-      }
+      try {
+        const [suppliers, storages, products, conceptionId] = await Promise.all([
+          this.getSuppliers(),
+          this.getStorages(),
+          this.getProducts(),
+          this.getDefaultConceptionId()
+        ]);
 
-      const matcher = new ProductCatalogMatcher(products, this.repo);
-      const matched: Array<{ productId: string; qty: number; price: number; sum: number }> = [];
-      const unmatched: string[] = [];
-      const unitWarnings: string[] = [];
-
-      for (const item of invoice.items) {
-        const analysis = matcher.analyzeItem(item.name, item.unit, item.iiko_product_name);
-        if (analysis.status !== 'matched' || !analysis.match) {
-          unmatched.push(item.name);
-          continue;
+        const supplier = this.findEntityByName(suppliers, invoice.supplier || '');
+        if (!supplier) {
+          return {
+            success: false,
+            message: `Поставщик «${invoice.supplier}» не найден в iiko. Добавьте его в iikoWeb или поправьте название накладной.`
+          };
         }
 
-        const match = analysis.match;
-        if (match.unitMismatch && match.unitWarning) {
-          unitWarnings.push(match.unitWarning);
+        const keywords = invoice.warehouse === 'household' ? ['хоз', 'household'] : ['кухн', 'kitchen'];
+        const storage =
+          storages.find(s => keywords.some(k => s.name.toLowerCase().includes(k))) || storages[0];
+        if (!storage) {
+          return { success: false, message: 'В iiko не найдено ни одного склада.' };
         }
 
-        // Persist confirmed mapping to SQLite product_mappings
-        if (this.repo && (match.source === 'mapping' || match.source === 'exact' || match.score >= 0.88)) {
-          matcher.saveMapping(item.name, match.product);
+        const matcher = new ProductCatalogMatcher(products, this.repo);
+        const matched: Array<{ productId: string; qty: number; price: number; sum: number }> = [];
+        const unmatched: string[] = [];
+        const unitWarnings: string[] = [];
+
+        for (const item of invoice.items) {
+          const analysis = matcher.analyzeItem(item.name, item.unit, item.iiko_product_name);
+          if (analysis.status !== 'matched' || !analysis.match) {
+            unmatched.push(item.name);
+            continue;
+          }
+
+          const match = analysis.match;
+          if (match.unitMismatch && match.unitWarning) {
+            unitWarnings.push(match.unitWarning);
+          }
+
+          // Persist confirmed mapping to SQLite product_mappings
+          if (this.repo && (match.source === 'mapping' || match.source === 'exact' || match.score >= 0.88)) {
+            matcher.saveMapping(item.name, match.product);
+          }
+
+          const sum = item.sum || item.qty * item.price;
+          matched.push({ productId: match.product.id, qty: item.qty, price: item.price, sum });
         }
 
-        const sum = item.sum || item.qty * item.price;
-        matched.push({ productId: match.product.id, qty: item.qty, price: item.price, sum });
-      }
+        // Requirement: Block invoice creation in iiko if any item is unmatched
+        if (unmatched.length > 0) {
+          return {
+            success: false,
+            unmatched,
+            unitWarnings: unitWarnings.length ? unitWarnings : undefined,
+            message: `Создание накладной заблокировано: следующие позиции не сопоставлены с номенклатурой iiko: ${unmatched.join(', ')}. Выберите соответствие в Mini App перед отправкой.`
+          };
+        }
 
-      // Requirement: Block invoice creation in iiko if any item is unmatched
-      if (unmatched.length > 0) {
-        return {
-          success: false,
-          unmatched,
-          unitWarnings: unitWarnings.length ? unitWarnings : undefined,
-          message: `Создание накладной заблокировано: следующие позиции не сопоставлены с номенклатурой iiko: ${unmatched.join(', ')}. Выберите соответствие в Mini App перед отправкой.`
-        };
-      }
+        if (!matched.length) {
+          return {
+            success: false,
+            unmatched,
+            unitWarnings: unitWarnings.length ? unitWarnings : undefined,
+            message: `Ни один товар не найден в номенклатуре iiko.`
+          };
+        }
 
-      if (!matched.length) {
-        return {
-          success: false,
-          unmatched,
-          unitWarnings: unitWarnings.length ? unitWarnings : undefined,
-          message: `Ни один товар не найден в номенклатуре iiko.`
-        };
-      }
+        const templates = await this.request<any[]>('/api/documents/product/ids', {
+          method: 'POST',
+          body: matched.map(m => m.productId)
+        });
+        const templateById = new Map(templates.map(t => [t.id, t]));
 
-      const templates = await this.request<any[]>('/api/documents/product/ids', {
-        method: 'POST',
-        body: matched.map(m => m.productId)
-      });
-      const templateById = new Map(templates.map(t => [t.id, t]));
-
-      const dateIncoming = this.parseDate(invoice.date);
-      const header = {
-        type: 'INCOMING_INVOICE',
-        documentNumber: '',
-        status: 'DRAFT',
-        dateIncoming,
-        comment: invoice.notes || 'Создано iiko-bot из фото накладной',
-        conception: conceptionId,
-        store: String((await this.request<any>('/api/stores/list')).stores?.[0]?.id ?? ''),
-        editable: true,
-        isAutomatic: false,
-        invoice: '',
-        invoiceDate: '',
-        incomingDocumentNumber: null,
-        transportInvoiceNumber: null,
-        externalOrderNumber: null,
-        mapping_value: '',
-        fromExternalService: null,
-        supplier: supplier.id,
-        storage: storage.id
-      };
-
-      const created = await this.request<{ data: { id: string; documentNumber: string } }>('/api/documents/create', {
-        method: 'POST',
-        body: header
-      });
-      const { id: documentId, documentNumber } = created.data;
-
-      const items = matched.map(m => {
-        const t = templateById.get(m.productId);
-        return {
-          ...t,
-          actualAmount: m.qty,
-          amount: m.qty,
-          count: m.qty,
-          price: m.price,
-          priceWithoutNds: m.price,
-          sum: m.sum,
-          sumWithoutNds: m.sum,
-          ndsPercent: 0,
-          id: null,
+        const dateIncoming = this.parseDate(invoice.date);
+        const header = {
+          type: 'INCOMING_INVOICE',
+          documentNumber: '',
+          status: 'DRAFT',
+          dateIncoming,
+          comment: invoice.notes || 'Создано iiko-bot из фото накладной',
+          conception: conceptionId,
+          store: String((await this.request<any>('/api/stores/list')).stores?.[0]?.id ?? ''),
+          editable: true,
+          isAutomatic: false,
+          invoice: '',
+          invoiceDate: '',
+          incomingDocumentNumber: null,
+          transportInvoiceNumber: null,
+          externalOrderNumber: null,
+          mapping_value: '',
+          fromExternalService: null,
+          supplier: supplier.id,
           storage: storage.id
         };
-      });
 
-      await this.request(`/api/documents/save/${documentId}`, {
-        method: 'POST',
-        body: { ...header, documentNumber, items, invoice: null, fromExternalService: false }
-      });
+        const created = await this.request<{ data: { id: string; documentNumber: string } }>('/api/documents/create', {
+          method: 'POST',
+          body: header
+        });
+        const { id: documentId, documentNumber } = created.data;
 
-      const messageParts: string[] = [];
-      if (unmatched.length) {
-        messageParts.push(`Не найдены в номенклатуре iiko и не добавлены: ${unmatched.join(', ')}`);
+        const items = matched.map(m => {
+          const t = templateById.get(m.productId);
+          return {
+            ...t,
+            actualAmount: m.qty,
+            amount: m.qty,
+            count: m.qty,
+            price: m.price,
+            priceWithoutNds: m.price,
+            sum: m.sum,
+            sumWithoutNds: m.sum,
+            ndsPercent: 0,
+            id: null,
+            storage: storage.id
+          };
+        });
+
+        await this.request(`/api/documents/save/${documentId}`, {
+          method: 'POST',
+          body: { ...header, documentNumber, items, invoice: null, fromExternalService: false }
+        });
+
+        const messageParts: string[] = [];
+        if (unmatched.length) {
+          messageParts.push(`Не найдены в номенклатуре iiko и не добавлены: ${unmatched.join(', ')}`);
+        }
+        if (unitWarnings.length) {
+          messageParts.push(unitWarnings.join('\n'));
+        }
+
+        return {
+          success: true,
+          documentId,
+          documentNumber,
+          unmatched: unmatched.length ? unmatched : undefined,
+          unitWarnings: unitWarnings.length ? unitWarnings : undefined,
+          message: messageParts.length ? messageParts.join('\n\n') : undefined
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          message: err.message || 'Ошибка отправки в iiko'
+        };
       }
-      if (unitWarnings.length) {
-        messageParts.push(unitWarnings.join('\n'));
-      }
-
-      return {
-        success: true,
-        documentId,
-        documentNumber,
-        unmatched: unmatched.length ? unmatched : undefined,
-        unitWarnings: unitWarnings.length ? unitWarnings : undefined,
-        message: messageParts.length ? messageParts.join('\n\n') : undefined
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        message: err.message || 'Ошибка отправки в iiko'
-      };
-    } finally {
-      await this.logout();
-    }
+    });
   }
 }

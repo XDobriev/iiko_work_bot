@@ -1,11 +1,124 @@
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { config } from '../config.js';
 import { InvoiceWorkflow } from '../workflow/invoice-workflow.js';
 import { InvoiceDataSchema } from '../types/index.js';
 import { ProductCatalogMatcher } from '../iiko/matcher.js';
+
+export interface TelegramAuthValidationResult {
+  isValid: boolean;
+  user?: any;
+  authDate?: number;
+  error?: string;
+}
+
+/**
+ * Validates Telegram WebApp initData HMAC-SHA256 signature against botToken.
+ * Reference: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+ */
+export function validateTelegramInitData(
+  initData: string,
+  botToken: string,
+  maxAgeSeconds = 86400
+): TelegramAuthValidationResult {
+  if (!initData || typeof initData !== 'string') {
+    return { isValid: false, error: 'initData is empty' };
+  }
+  if (!botToken) {
+    return { isValid: false, error: 'botToken is required for validation' };
+  }
+
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    if (!hash) {
+      return { isValid: false, error: 'hash parameter missing' };
+    }
+
+    // Check auth_date if present
+    const authDateStr = params.get('auth_date');
+    if (authDateStr) {
+      const authDate = parseInt(authDateStr, 10);
+      const now = Math.floor(Date.now() / 1000);
+      if (maxAgeSeconds > 0 && (now - authDate > maxAgeSeconds || authDate > now + 300)) {
+        return { isValid: false, error: 'initData has expired' };
+      }
+    }
+
+    // Sort all keys except hash alphabetically
+    const entries: Array<[string, string]> = [];
+    params.forEach((value, key) => {
+      if (key !== 'hash') {
+        entries.push([key, value]);
+      }
+    });
+
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+    const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
+
+    // Secret key = HMAC_SHA256("WebAppData", botToken)
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+    const calculatedBuffer = Buffer.from(calculatedHash, 'hex');
+    const hashBuffer = Buffer.from(hash, 'hex');
+
+    if (calculatedBuffer.length !== hashBuffer.length || !crypto.timingSafeEqual(calculatedBuffer, hashBuffer)) {
+      return { isValid: false, error: 'Invalid HMAC signature' };
+    }
+
+    let user: any;
+    const userStr = params.get('user');
+    if (userStr) {
+      try {
+        user = JSON.parse(userStr);
+      } catch {}
+    }
+
+    return {
+      isValid: true,
+      user,
+      authDate: authDateStr ? parseInt(authDateStr, 10) : undefined
+    };
+  } catch (err: any) {
+    return { isValid: false, error: err.message || 'Validation error' };
+  }
+}
+
+export function extractTelegramInitData(req: http.IncomingMessage, parsedUrl: URL): string | null {
+  // 1. Authorization header: "tma <initData>" or "Bearer <initData>" or "<initData>"
+  const authHeader = req.headers['authorization'];
+  if (authHeader) {
+    const trimmed = authHeader.trim();
+    if (trimmed.toLowerCase().startsWith('tma ')) {
+      return trimmed.slice(4).trim();
+    }
+    if (trimmed.toLowerCase().startsWith('bearer ')) {
+      return trimmed.slice(7).trim();
+    }
+    if (trimmed.includes('hash=')) {
+      return trimmed;
+    }
+  }
+
+  // 2. Custom header
+  const customHeader = req.headers['x-telegram-init-data'];
+  if (typeof customHeader === 'string' && customHeader.trim()) {
+    return customHeader.trim();
+  }
+
+  // 3. Query param
+  const queryInitData = parsedUrl.searchParams.get('initData');
+  if (queryInitData) {
+    return queryInitData.trim();
+  }
+
+  return null;
+}
 
 export interface WebAppServerInstance {
   server: http.Server;
@@ -34,6 +147,8 @@ function resolveHtmlPath(): string | null {
 
 export interface WebAppServerOptions {
   onInvoiceUpdated?: (invoiceId: number, cardText: string, hasPhoto: boolean) => Promise<void> | void;
+  botToken?: string;
+  requireAuth?: boolean;
 }
 
 export function startWebAppServer(
@@ -75,6 +190,37 @@ export function startWebAppServer(
         res.end('Шаблон Telegram Mini App не найден на диске.');
       }
       return;
+    }
+
+    // 2.1. Authentication middleware for /api/* endpoints
+    if (pathname.startsWith('/api/')) {
+      const botToken = options?.botToken || config.telegram.token;
+      const requireAuth = options?.requireAuth ?? false;
+      const initData = extractTelegramInitData(req, parsedUrl);
+
+      if (requireAuth || initData) {
+        if (!initData) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, message: 'Необходима авторизация Telegram WebApp (отсутствует initData)' }));
+          return;
+        }
+
+        const authResult = validateTelegramInitData(initData, botToken);
+        if (!authResult.isValid) {
+          res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ success: false, message: `Ошибка авторизации Telegram WebApp: ${authResult.error || 'неверная подпись'}` }));
+          return;
+        }
+
+        const allowedIds = config.telegram.allowedUserIds;
+        if (allowedIds.length > 0 && authResult.user?.id) {
+          if (!allowedIds.includes(authResult.user.id)) {
+            res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ success: false, message: 'Доступ ограничен: пользователь не входит в список разрешенных' }));
+            return;
+          }
+        }
+      }
     }
 
     const repo = workflow.getRepo();

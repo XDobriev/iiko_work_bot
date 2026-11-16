@@ -14,13 +14,8 @@ import {
 import { startWebAppServer } from '../src/webapp/server.js';
 import { InvoiceData } from '../src/types/index.js';
 
-const TEST_REVIEW_DB = './data/test_review_fixes.db';
-
 function setupRepo(): InvoicesRepository {
-  if (fs.existsSync(TEST_REVIEW_DB)) {
-    try { fs.unlinkSync(TEST_REVIEW_DB); } catch {}
-  }
-  const db = getDatabase(TEST_REVIEW_DB);
+  const db = getDatabase(':memory:');
   return new InvoicesRepository(db);
 }
 

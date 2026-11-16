@@ -179,3 +179,54 @@ test('InvoiceWorkflow supports voice recognition and rejection', async () => {
   const domain = repo.getInvoice(voiceRes.invoiceId);
   assert.strictEqual(domain?.invoice.status, 'rejected');
 });
+
+test('InvoiceWorkflow persists and restores edit sessions across restarts via SQLite', async () => {
+  const initialInvoice: InvoiceData = {
+    date: '22.11.2026',
+    supplier: 'Ферма',
+    warehouse: 'kitchen',
+    items: [{ name: 'Молоко', qty: 10, price: 80, sum: 800 }]
+  };
+
+  const { workflow, repo } = setupWorkflow(initialInvoice);
+  const { invoiceId } = repo.saveInvoice(initialInvoice);
+
+  const userId = 777123;
+  workflow.saveEditSession(userId, {
+    invoiceId,
+    cardMessageId: 4400,
+    chatId: -100123456,
+    editPromptMessageId: 4401
+  });
+
+  // Verify stored session in initial workflow
+  const session1 = workflow.getEditSession(userId);
+  assert.ok(session1);
+  assert.equal(session1.invoiceId, invoiceId);
+  assert.equal(session1.cardMessageId, 4400);
+  assert.equal(session1.chatId, -100123456);
+  assert.equal(session1.editPromptMessageId, 4401);
+
+  // Simulate process restart: instantiate a completely new InvoiceWorkflow instance with the same database
+  const restartedWorkflow = new InvoiceWorkflow({
+    repo,
+    photosDir: TEST_PHOTOS_DIR
+  });
+
+  // Session must survive process restart
+  const restoredSession = restartedWorkflow.getEditSession(userId);
+  assert.ok(restoredSession);
+  assert.equal(restoredSession.invoiceId, invoiceId);
+  assert.equal(restoredSession.cardMessageId, 4400);
+
+  // Apply edit through restarted workflow using the restored session
+  const editRes = restartedWorkflow.applyTextEdit(restoredSession.invoiceId, '1: 15 * 85');
+  assert.equal(editRes.success, true);
+  assert.equal(editRes.data?.items[0].qty, 15);
+  assert.equal(editRes.data?.items[0].price, 85);
+
+  // Delete session
+  const deleted = restartedWorkflow.deleteEditSession(userId);
+  assert.equal(deleted, true);
+  assert.equal(restartedWorkflow.getEditSession(userId), null);
+});

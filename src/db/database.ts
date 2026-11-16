@@ -26,6 +26,7 @@ export function getDatabase(customPath?: string): DatabaseSync {
 
   // Initialize and migrate schema
   db.exec(`
+    PRAGMA busy_timeout = 5000;
     PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS invoices (
@@ -134,6 +135,7 @@ export function getDatabase(customPath?: string): DatabaseSync {
       updated_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
 
+    CREATE INDEX IF NOT EXISTS idx_items_invoice_id ON invoice_items(invoice_id);
     CREATE INDEX IF NOT EXISTS idx_items_norm_name ON invoice_items(normalized_name);
     CREATE INDEX IF NOT EXISTS idx_invoices_supplier ON invoices(supplier);
     CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date);

@@ -8,14 +8,9 @@ import { InvoiceWorkflow } from '../src/workflow/invoice-workflow.js';
 import { startWebAppServer, WebAppServerInstance } from '../src/webapp/server.js';
 import { InvoiceData } from '../src/types/index.js';
 
-const PLAYWRIGHT_TEST_DB = './data/test_playwright.db';
-
 test('Playwright E2E: Telegram Mini App renders warehouse badges, edits items, and saves changes', async () => {
   // 1. Setup isolated database and workflow
-  if (fs.existsSync(PLAYWRIGHT_TEST_DB)) {
-    try { fs.unlinkSync(PLAYWRIGHT_TEST_DB); } catch {}
-  }
-  const db = getDatabase(PLAYWRIGHT_TEST_DB);
+  const db = getDatabase(':memory:');
   const repo = new InvoicesRepository(db);
   const mockIikoClient: any = {
     isConfigured: () => false,
@@ -118,18 +113,11 @@ test('Playwright E2E: Telegram Mini App renders warehouse badges, edits items, a
   } finally {
     await browser.close();
     await webAppInstance.stop();
-    if (fs.existsSync(PLAYWRIGHT_TEST_DB)) {
-      try { fs.unlinkSync(PLAYWRIGHT_TEST_DB); } catch {}
-    }
   }
 });
 
 test('Playwright E2E: Telegram Mini App interactive nomenclature matching, chips selection, live search, and send blocking', async () => {
-  const TEST_MATCH_DB = './data/test_playwright_match.db';
-  if (fs.existsSync(TEST_MATCH_DB)) {
-    try { fs.unlinkSync(TEST_MATCH_DB); } catch {}
-  }
-  const db = getDatabase(TEST_MATCH_DB);
+  const db = getDatabase(':memory:');
   const repo = new InvoicesRepository(db);
 
   const mockCatalog = [
@@ -189,8 +177,8 @@ test('Playwright E2E: Telegram Mini App interactive nomenclature matching, chips
   assert.strictEqual(ambBlockedSync.success, false, 'Sync must be blocked for ambiguous items requiring selection');
   assert.ok(ambBlockedSync.unmatched?.includes('Сыр'), 'Ambiguous "Сыр" must be flagged as unmatched');
 
-  // Start webapp server on port 3848
-  const testPort = 3848;
+  // Start webapp server on port 3849 (distinct from test 1 to prevent TIME_WAIT collision)
+  const testPort = 3849;
   const webAppInstance: WebAppServerInstance = startWebAppServer(workflow, testPort);
 
   let browser: Browser;
@@ -314,8 +302,5 @@ test('Playwright E2E: Telegram Mini App interactive nomenclature matching, chips
   } finally {
     await browser.close();
     await webAppInstance.stop();
-    if (fs.existsSync(TEST_MATCH_DB)) {
-      try { fs.unlinkSync(TEST_MATCH_DB); } catch {}
-    }
   }
 });

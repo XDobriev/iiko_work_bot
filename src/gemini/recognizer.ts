@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import { InvoiceData, InvoiceDataSchema } from '../types/index.js';
 import { classifyInvoiceItems } from '../workflow/warehouse-classifier.js';
-import { GeminiAutopilot } from './autopilot.js';
+import { GeminiAutopilot } from './model-selection.js';
 
 export type RecognizerTask = 'photo' | 'voice' | 'complex' | 'general';
 
@@ -12,12 +12,25 @@ export interface RecognizerModelOptions {
   complexModels?: string[];
 }
 
+export interface RecognizerProgress {
+  elapsedSec: number;
+  active: boolean;
+  model: string;
+  attempt: number;
+  phase?: 'primary' | 'escalation' | 'edit';
+}
+
 export interface RecognizerOptions {
   task?: RecognizerTask;
   knownItems?: string[];
   knownItemsWithUnits?: Array<{ name: string; unit?: string }>;
   knownSuppliers?: string[];
   escalateOnDiscrepancy?: boolean;
+  onProgress?: (progress: RecognizerProgress) => void;
+  timeoutMs?: number;
+  stalledTimeoutMs?: number;
+  phase?: 'primary' | 'escalation' | 'edit';
+  userHint?: string;
 }
 
 export const GEMINI_INVOICE_RESPONSE_SCHEMA = {
@@ -111,6 +124,204 @@ export function extractCandidateText(candidate: any): string | undefined {
   return candidate.content.parts[0]?.text;
 }
 
+async function callGeminiApiWithHeartbeat(
+  model: string,
+  apiKey: string,
+  requestBody: any,
+  options?: RecognizerOptions,
+  attempt: number = 1
+): Promise<{ text: string; model: string }> {
+  const totalTimeoutMs = options?.timeoutMs || config.gemini.timeoutMs || 120000;
+  const stalledTimeoutMs = options?.stalledTimeoutMs || config.gemini.stalledTimeoutMs || 25000;
+  const startTime = Date.now();
+
+  const controller = new AbortController();
+  let isStalled = false;
+  let isTotalTimeout = false;
+  let stalledTimer: NodeJS.Timeout | null = null;
+
+  const kickTimer = () => {
+    if (stalledTimer) clearTimeout(stalledTimer);
+    stalledTimer = setTimeout(() => {
+      isStalled = true;
+      controller.abort(new Error(`STALLED_STREAM_TIMEOUT: Нет данных от ${model} более ${Math.round(stalledTimeoutMs / 1000)} сек`));
+    }, stalledTimeoutMs);
+
+    const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+    options?.onProgress?.({
+      elapsedSec,
+      active: true,
+      model,
+      attempt,
+      phase: options?.phase || 'primary'
+    });
+  };
+
+  const totalTimer = setTimeout(() => {
+    isTotalTimeout = true;
+    controller.abort(new Error(`TOTAL_TIMEOUT: Превышен общий таймаут ${Math.round(totalTimeoutMs / 1000)} сек`));
+  }, totalTimeoutMs);
+
+  kickTimer();
+
+  try {
+    const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
+    let response: Response;
+    try {
+      response = await fetch(streamUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+          'Accept': 'text/event-stream'
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+    } catch (netErr: any) {
+      if (isStalled || isTotalTimeout) throw netErr;
+      // Fallback directly to standard generateContent if stream endpoint network failed
+      const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      response = await fetch(fallbackUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+    }
+
+    // If 404 / 405 on stream endpoint, fallback to standard generateContent
+    if (!response.ok && (response.status === 404 || response.status === 405)) {
+      const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+      response = await fetch(fallbackUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+    }
+
+    // Reset stalled timer upon successful HTTP handshake
+    kickTimer();
+
+    if (!response.ok) {
+      const errText = await response.text();
+      const status = response.status;
+      const error: any = new Error(`Gemini API (${status}) на ${model}: ${errText.slice(0, 150)}`);
+      error.status = status;
+      error.model = model;
+      throw error;
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    let extractedText = '';
+
+    if (contentType.includes('text/event-stream') && response.body) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const onAbort = () => {
+        reader.cancel(controller.signal.reason).catch(() => {});
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (controller.signal.aborted) {
+            throw controller.signal.reason || new Error('Stream aborted');
+          }
+          if (done) break;
+
+          kickTimer();
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            parseSseLine(line);
+          }
+        }
+
+        // Flush any remaining text in decoder and buffer
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          parseSseLine(buffer);
+        }
+
+        function parseSseLine(line: string) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) return;
+          if (trimmed.startsWith('data: ')) {
+            const dataStr = trimmed.slice(6).trim();
+            if (dataStr === '[DONE]') return;
+            try {
+              const chunkJson = JSON.parse(dataStr);
+              if (chunkJson.error) {
+                const streamErr: any = new Error(
+                  chunkJson.error.message || `Gemini API stream error (${chunkJson.error.code || 500})`
+                );
+                streamErr.status = chunkJson.error.code || 500;
+                streamErr.model = model;
+                throw streamErr;
+              }
+              const candidate = chunkJson.candidates?.[0];
+              const parts = candidate?.content?.parts;
+              if (Array.isArray(parts)) {
+                for (const part of parts) {
+                  // Only accumulate actual output text, exclude thinking/thought scratchpad parts
+                  if (!part.thought && typeof part.text === 'string') {
+                    extractedText += part.text;
+                  }
+                }
+              }
+            } catch (err: any) {
+              if (err.status) throw err;
+              // Ignore partial JSON chunks in stream
+            }
+          }
+        }
+      } finally {
+        controller.signal.removeEventListener('abort', onAbort);
+      }
+    } else {
+      // Standard JSON response
+      const json = (await response.json()) as any;
+      const candidate = json.candidates?.[0];
+      const text = extractCandidateText(candidate);
+      if (text) {
+        extractedText = text;
+      }
+    }
+
+    return { text: extractedText, model };
+  } catch (err: any) {
+    if (isStalled || err?.message?.includes('STALLED_STREAM_TIMEOUT')) {
+      const e: any = new Error(`STALLED_STREAM: Соединение с моделью ${model} зависло (тишина >${Math.round(stalledTimeoutMs / 1000)}с)`);
+      e.isStalled = true;
+      e.model = model;
+      throw e;
+    }
+    if (isTotalTimeout || err?.message?.includes('TOTAL_TIMEOUT')) {
+      const e: any = new Error(`TOTAL_TIMEOUT: Превышен таймаут ${Math.round(totalTimeoutMs / 1000)}с на модели ${model}`);
+      e.isTotalTimeout = true;
+      e.model = model;
+      throw e;
+    }
+    throw err;
+  } finally {
+    if (stalledTimer) clearTimeout(stalledTimer);
+    clearTimeout(totalTimer);
+  }
+}
+
 export class GeminiInvoiceRecognizer {
   private apiKey: string;
   private hasExplicitModels: boolean = false;
@@ -186,6 +397,11 @@ export class GeminiInvoiceRecognizer {
       memoryContext += `\nИзвестные позиции/товары из предыдущих накладных: ${options.knownItems.slice(0, 80).join(', ')}.`;
     }
 
+    let userHintContext = '';
+    if (options.userHint && options.userHint.trim()) {
+      userHintContext = `\nКомментарий/подсказка пользователя к этой накладной: "${options.userHint.trim()}". Обязательно учти это прямое указание сотрудника (склад, поставщик, исправления или контекст).`;
+    }
+
     const taskDesc = isVoice
       ? 'Твоя задача — прослушать голосовое сообщение шеф-повара/управляющего ресторана и извлечь данные о закупке (поставщик, товары, количество, цены, склад).'
       : 'Твоя задача — точно извлечь все позиции, цены, количества, суммы, дату, поставщика и склад с фото накладной.';
@@ -193,6 +409,7 @@ export class GeminiInvoiceRecognizer {
     return `Ты профессиональный помощник ресторана по распознаванию рукописных накладных и товарных чеков на русском языке.
 ${taskDesc}
 ${memoryContext ? memoryContext + '\nИспользуй эти известные названия и тары для сопоставления терминологии ресторана.' : ''}
+${userHintContext}
 
 Правила:
 1. "date": дата накладной в формате "ДД.ММ.ГГГГ" (если год не указан, поставь текущий год ${currentYear}).
@@ -221,49 +438,29 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
   private async executeGenerateContent(
     requestBody: any,
     isVoice = false,
-    modelsList?: string[]
+    modelsList?: string[],
+    options?: RecognizerOptions
   ): Promise<InvoiceData> {
     const candidateModels = modelsList && modelsList.length > 0
       ? modelsList
       : this.getCandidateModels(isVoice ? 'voice' : 'photo');
     let lastError: any = null;
 
-    for (const model of candidateModels) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const totalTimeoutMs = options?.timeoutMs || config.gemini.timeoutMs || 120000;
 
+    for (const model of candidateModels) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          console.log(`[Gemini] Запрос к ${model} (попытка ${attempt}/2)...`);
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': this.apiKey
-            },
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(25000)
-          });
+          console.log(`[Gemini] Запрос к ${model} (попытка ${attempt}/2, таймаут: ${Math.round(totalTimeoutMs / 1000)}с)...`);
+          const { text: rawContent } = await callGeminiApiWithHeartbeat(
+            model,
+            this.apiKey,
+            requestBody,
+            options,
+            attempt
+          );
 
-          if (!response.ok) {
-            const errText = await response.text();
-            console.warn(`[Gemini] Модель ${model} вернула HTTP ${response.status}: ${errText.slice(0, 120)}`);
-            if (response.status === 503 || response.status === 429 || response.status === 500) {
-              lastError = new Error(`Gemini API (${response.status}) на ${model}: ${errText}`);
-              if (attempt < 2) {
-                console.log(`[Gemini] Пауза 1.5с перед повтором к ${model}...`);
-                await new Promise(r => setTimeout(r, 1500));
-                continue;
-              }
-              break;
-            }
-            throw new Error(`Gemini API error (${response.status}): ${errText}`);
-          }
-
-          const json = (await response.json()) as any;
-          const candidate = json.candidates?.[0];
-          const rawContent = extractCandidateText(candidate);
-
-          if (!rawContent) {
+          if (!rawContent || !rawContent.trim()) {
             throw new Error(isVoice ? 'Нейросеть не смогла распознать голос.' : 'Нейросеть вернула пустой ответ.');
           }
 
@@ -294,8 +491,39 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
           return validated;
         } catch (err: any) {
           lastError = err;
+
+          // 1. Instant 401 Auth error check
+          if (err.status === 401) {
+            throw new Error('Ошибка авторизации Google Gemini API (HTTP 401): проверьте GEMINI_API_KEY в файле .env');
+          }
+
+          // 2. Instant 429 Quota Exceeded check
+          if (err.status === 429) {
+            console.warn(`[Gemini] ⚠️ Модель ${model} превысила квоту (HTTP 429 Quota Exceeded). Мгновенное переключение на резервную модель...`);
+            break; // Do not wait, switch immediately
+          }
+
+          // 3. Instant 400 Bad Request check
+          if (err.status === 400) {
+            console.warn(`[Gemini] ⚠️ Модель ${model} вернула HTTP 400 Bad Request: ${err.message}. Переключение на резервную модель...`);
+            break; // Switch immediately
+          }
+
+          // 4. Stalled Stream / Inactivity timeout (silence > 25s)
+          if (err.isStalled) {
+            console.warn(`[Gemini] ⚠️ Соединение с моделью ${model} зависло (тишина >25с). Немедленно переключаемся на резервную модель...`);
+            break; // Switch immediately
+          }
+
+          // 5. Total timeout
+          if (err.isTotalTimeout) {
+            console.warn(`[Gemini] ⚠️ Превышен общий таймаут на модели ${model}. Переключение на резервную модель...`);
+            break; // Switch immediately
+          }
+
+          // 6. Temporary server errors (500, 503) or JSON parsing errors
           console.warn(`[Gemini] Ошибка вызова ${model} (попытка ${attempt}): ${err.message}`);
-          if (attempt < 2 && (err.name === 'TimeoutError' || err.message?.includes('503') || err.message?.includes('JSON'))) {
+          if (attempt < 2 && (err.status === 503 || err.status === 500 || err.message?.includes('JSON'))) {
             await new Promise(r => setTimeout(r, 1500));
             continue;
           }
@@ -309,45 +537,26 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
 
   private async executeEditGenerateContent(
     requestBody: any,
-    task: RecognizerTask = 'general'
+    task: RecognizerTask = 'general',
+    options?: RecognizerOptions
   ): Promise<{ data: InvoiceData; summary: string }> {
     const candidateModels = this.getCandidateModels(task);
     let lastError: any = null;
+    const totalTimeoutMs = options?.timeoutMs || config.gemini.timeoutMs || 120000;
 
     for (const model of candidateModels) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          console.log(`[Gemini Edit] Запрос к ${model} (попытка ${attempt}/2)...`);
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': this.apiKey
-            },
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(25000)
-          });
+          console.log(`[Gemini Edit] Запрос к ${model} (попытка ${attempt}/2, таймаут: ${Math.round(totalTimeoutMs / 1000)}с)...`);
+          const { text: rawContent } = await callGeminiApiWithHeartbeat(
+            model,
+            this.apiKey,
+            requestBody,
+            options,
+            attempt
+          );
 
-          if (!response.ok) {
-            const errText = await response.text();
-            console.warn(`[Gemini Edit] ${model} HTTP ${response.status}: ${errText.slice(0, 120)}`);
-            if (response.status === 503 || response.status === 429 || response.status === 500) {
-              lastError = new Error(`Gemini API (${response.status}) на ${model}: ${errText}`);
-              if (attempt < 2) {
-                await new Promise(r => setTimeout(r, 1500));
-                continue;
-              }
-              break;
-            }
-            throw new Error(`Gemini API error (${response.status}): ${errText}`);
-          }
-
-          const json = (await response.json()) as any;
-          const candidate = json.candidates?.[0];
-          const rawContent = extractCandidateText(candidate);
-          if (!rawContent) {
+          if (!rawContent || !rawContent.trim()) {
             throw new Error('Нейросеть вернула пустой ответ при редактировании.');
           }
 
@@ -372,8 +581,33 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
           return { data: validated, summary };
         } catch (err: any) {
           lastError = err;
+
+          if (err.status === 401) {
+            throw new Error('Ошибка авторизации Google Gemini API (HTTP 401): проверьте GEMINI_API_KEY в файле .env');
+          }
+
+          if (err.status === 429) {
+            console.warn(`[Gemini Edit] ⚠️ Модель ${model} превысила квоту (HTTP 429). Переключение на резервную модель...`);
+            break;
+          }
+
+          if (err.status === 400) {
+            console.warn(`[Gemini Edit] ⚠️ Модель ${model} вернула HTTP 400: ${err.message}. Переключение на резервную модель...`);
+            break;
+          }
+
+          if (err.isStalled) {
+            console.warn(`[Gemini Edit] ⚠️ Соединение с моделью ${model} зависло (тишина >25с). Переключение на резервную модель...`);
+            break;
+          }
+
+          if (err.isTotalTimeout) {
+            console.warn(`[Gemini Edit] ⚠️ Превышен общий таймаут на модели ${model}. Переключение на резервную модель...`);
+            break;
+          }
+
           console.warn(`[Gemini Edit] Ошибка ${model}: ${err.message}`);
-          if (attempt < 2 && (err.name === 'TimeoutError' || err.message?.includes('503') || err.message?.includes('JSON'))) {
+          if (attempt < 2 && (err.status === 503 || err.status === 500 || err.message?.includes('JSON'))) {
             await new Promise(r => setTimeout(r, 1500));
             continue;
           }
@@ -416,7 +650,7 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
       }
     };
 
-    const initialResult = await this.executeGenerateContent(requestBody, false, photoModels);
+    const initialResult = await this.executeGenerateContent(requestBody, false, photoModels, { ...options, phase: 'primary' });
 
     // Cascade escalation check
     const shouldCheckEscalation = options.escalateOnDiscrepancy !== false;
@@ -487,7 +721,10 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
         };
 
         try {
-          const escalatedResult = await this.executeGenerateContent(escalationBody, false, escalationCandidates);
+          const escalatedResult = await this.executeGenerateContent(escalationBody, false, escalationCandidates, {
+            ...options,
+            phase: 'escalation'
+          });
           let isImproved = false;
 
           if (initialResult.items.length === 0 && escalatedResult.items.length > 0) {
@@ -558,7 +795,7 @@ ${memoryContext ? memoryContext + '\nИспользуй эти известны�
       }
     };
 
-    return this.executeGenerateContent(requestBody, true, voiceModels);
+    return this.executeGenerateContent(requestBody, true, voiceModels, options);
   }
 
   /**

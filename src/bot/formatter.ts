@@ -2,11 +2,71 @@ import { InvoiceData, InvoiceItem, HistoricalComparison } from '../types/index.j
 import { DailyStats } from '../db/invoices.repo.js';
 import { classifyItemWarehouse } from '../workflow/warehouse-classifier.js';
 
-export function escapeHtml(str: string): string {
-  return str
+export function escapeHtml(str: any): string {
+  return String(str ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+/**
+ * Safely balances unclosed Telegram HTML tags and guarantees message length <= 4096 characters.
+ */
+export function clampTelegramHtml(html: string, maxLen = 4000): string {
+  if (html.length <= 4096) {
+    return html;
+  }
+
+  const truncatedNotice = '\n\n✂️ <i>[Список сокращен: откройте Mini App для полной версии]</i>';
+  let sliced = html.slice(0, maxLen - truncatedNotice.length);
+
+  // If sliced in the middle of a tag like "<pre", remove the partial tag
+  const lastLt = sliced.lastIndexOf('<');
+  const lastGt = sliced.lastIndexOf('>');
+  if (lastLt > lastGt) {
+    sliced = sliced.slice(0, lastLt);
+  }
+
+  // Balance tags
+  const openTags: string[] = [];
+  const tagRegex = /<\/?([a-zA-Z0-9]+)(?:\s+[^>]*)?>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRegex.exec(sliced)) !== null) {
+    const fullTag = match[0];
+    const tagName = match[1].toLowerCase();
+    if (fullTag.startsWith('</')) {
+      const lastIdx = openTags.lastIndexOf(tagName);
+      if (lastIdx !== -1) {
+        openTags.splice(lastIdx, 1);
+      }
+    } else if (!fullTag.endsWith('/>')) {
+      openTags.push(tagName);
+    }
+  }
+
+  // Close remaining open tags in reverse order
+  let closingTags = '';
+  for (let i = openTags.length - 1; i >= 0; i--) {
+    closingTags += `</${openTags[i]}>`;
+  }
+
+  return sliced + closingTags + truncatedNotice;
+}
+
+function formatTableRow(index: number, item: InvoiceItem, itemSum: number): string {
+  const num = (index + 1).toString().padEnd(2, ' ');
+  let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
+  name = name.padEnd(17, ' ');
+
+  const unit = item.unit || 'шт';
+  const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
+  const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
+
+  const price = Math.round(item.price).toString().padStart(6, ' ');
+  const sum = Math.round(itemSum).toString().padStart(7, ' ');
+
+  return `${num} ${name} ${qtyStr} ${price} ${sum}`;
 }
 
 export function formatInvoiceMessage(
@@ -58,22 +118,20 @@ export function formatInvoiceMessage(
     tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
     tableLines.push('──────────────────────────────────────────────');
 
-    for (const { item, index } of kitchenItems) {
+    const shouldCompactKitchen = kitchenItems.length > 16;
+    const kitchenHeadCount = shouldCompactKitchen ? 10 : kitchenItems.length;
+    const kitchenTailCount = shouldCompactKitchen ? 2 : 0;
+
+    for (let i = 0; i < kitchenItems.length; i++) {
+      const { item, index } = kitchenItems[i];
       const itemSum = item.sum || item.qty * item.price;
       kitchenSum += itemSum;
 
-      const num = (index + 1).toString().padEnd(2, ' ');
-      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
-      name = name.padEnd(17, ' ');
-
-      const unit = item.unit || 'шт';
-      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
-      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
-
-      const price = Math.round(item.price).toString().padStart(6, ' ');
-      const sum = Math.round(itemSum).toString().padStart(7, ' ');
-
-      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+      if (!shouldCompactKitchen || i < kitchenHeadCount || i >= kitchenItems.length - kitchenTailCount) {
+        tableLines.push(formatTableRow(index, item, itemSum));
+      } else if (i === kitchenHeadCount) {
+        tableLines.push(`... и еще ${kitchenItems.length - kitchenHeadCount - kitchenTailCount} поз. (см. в Mini App) ...`);
+      }
     }
 
     tableLines.push('──────────────────────────────────────────────');
@@ -86,22 +144,20 @@ export function formatInvoiceMessage(
     tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
     tableLines.push('──────────────────────────────────────────────');
 
-    for (const { item, index } of householdItems) {
+    const shouldCompactHouse = householdItems.length > 16;
+    const houseHeadCount = shouldCompactHouse ? 10 : householdItems.length;
+    const houseTailCount = shouldCompactHouse ? 2 : 0;
+
+    for (let i = 0; i < householdItems.length; i++) {
+      const { item, index } = householdItems[i];
       const itemSum = item.sum || item.qty * item.price;
       houseSum += itemSum;
 
-      const num = (index + 1).toString().padEnd(2, ' ');
-      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
-      name = name.padEnd(17, ' ');
-
-      const unit = item.unit || 'шт';
-      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
-      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
-
-      const price = Math.round(item.price).toString().padStart(6, ' ');
-      const sum = Math.round(itemSum).toString().padStart(7, ' ');
-
-      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+      if (!shouldCompactHouse || i < houseHeadCount || i >= householdItems.length - houseTailCount) {
+        tableLines.push(formatTableRow(index, item, itemSum));
+      } else if (i === houseHeadCount) {
+        tableLines.push(`... и еще ${householdItems.length - houseHeadCount - houseTailCount} поз. (см. в Mini App) ...`);
+      }
     }
 
     calcTotal = kitchenSum + houseSum;
@@ -114,23 +170,20 @@ export function formatInvoiceMessage(
     tableLines.push('#  Наименование        Кол-во     Цена   Сумма');
     tableLines.push('──────────────────────────────────────────────');
 
+    const shouldCompact = data.items.length > 22;
+    const headCount = shouldCompact ? 14 : data.items.length;
+    const tailCount = shouldCompact ? 3 : 0;
+
     for (let i = 0; i < data.items.length; i++) {
       const item = data.items[i];
       const itemSum = item.sum || item.qty * item.price;
       calcTotal += itemSum;
 
-      const num = (i + 1).toString().padEnd(2, ' ');
-      let name = item.name.length > 17 ? item.name.substring(0, 15) + '..' : item.name;
-      name = name.padEnd(17, ' ');
-
-      const unit = item.unit || 'шт';
-      const qtyVal = item.qty % 1 === 0 ? item.qty.toString() : item.qty.toFixed(2);
-      const qtyStr = `${qtyVal} ${unit}`.padEnd(9, ' ');
-
-      const price = Math.round(item.price).toString().padStart(6, ' ');
-      const sum = Math.round(itemSum).toString().padStart(7, ' ');
-
-      tableLines.push(`${num} ${name} ${qtyStr} ${price} ${sum}`);
+      if (!shouldCompact || i < headCount || i >= data.items.length - tailCount) {
+        tableLines.push(formatTableRow(i, item, itemSum));
+      } else if (i === headCount) {
+        tableLines.push(`... и еще ${data.items.length - headCount - tailCount} поз. (см. в Mini App) ...`);
+      }
     }
 
     tableLines.push('──────────────────────────────────────────────');
@@ -190,7 +243,7 @@ export function formatInvoiceMessage(
     lines.push(`\n${badge} <i>Модель: ${escapeHtml(data.model_used)}</i>`);
   }
 
-  return lines.join('\n');
+  return clampTelegramHtml(lines.join('\n'));
 }
 
 export function formatDailyStats(stats: DailyStats): string {

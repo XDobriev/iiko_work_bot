@@ -53,7 +53,7 @@ export class InvoicesRepository {
   }
 
   /**
-   * Saves invoice and all its items in a single transaction.
+   * Saves invoice and all its items in a single atomic transaction.
    */
   saveInvoice(
     data: InvoiceData,
@@ -65,58 +65,65 @@ export class InvoicesRepository {
       totalCalculated += sum;
     }
 
-    const insertInvoice = this.db.prepare(`
-      INSERT INTO invoices (
-        restaurant_id, date, supplier, warehouse, total_calculated, total_written,
-        status, telegram_user_id, telegram_chat_id, telegram_message_id, card_message_id, photo_file_id, local_photo_path, raw_json, model_used
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const insertInvoice = this.db.prepare(`
+        INSERT INTO invoices (
+          restaurant_id, date, supplier, warehouse, total_calculated, total_written,
+          status, telegram_user_id, telegram_chat_id, telegram_message_id, card_message_id, photo_file_id, local_photo_path, raw_json, model_used
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    const modelUsed = meta?.modelUsed || data.model_used || null;
+      const modelUsed = meta?.modelUsed || data.model_used || null;
 
-    const result = insertInvoice.run(
-      meta?.restaurantId || 'beyni',
-      data.date || new Date().toISOString().slice(0, 10),
-      data.supplier || 'Не указан',
-      data.warehouse || 'kitchen',
-      totalCalculated,
-      data.total_written ?? null,
-      meta?.userId ?? null,
-      meta?.chatId ?? null,
-      meta?.messageId ?? null,
-      meta?.cardMessageId ?? null,
-      meta?.photoFileId ?? null,
-      meta?.localPhotoPath ?? null,
-      JSON.stringify(data),
-      modelUsed
-    );
-
-    const invoiceId = Number(result.lastInsertRowid);
-
-    const insertItem = this.db.prepare(`
-      INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const item of data.items) {
-      const sum = item.sum || item.qty * item.price;
-      const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
-      insertItem.run(
-        invoiceId,
-        item.name,
-        normalizeName(item.name),
-        item.qty,
-        item.price,
-        sum,
-        item.unit || 'шт',
-        wh,
-        item.iiko_product_name || null,
-        item.iiko_product_id || null
+      const result = insertInvoice.run(
+        meta?.restaurantId || 'beyni',
+        data.date || new Date().toISOString().slice(0, 10),
+        data.supplier || 'Не указан',
+        data.warehouse || 'kitchen',
+        totalCalculated,
+        data.total_written ?? null,
+        meta?.userId ?? null,
+        meta?.chatId ?? null,
+        meta?.messageId ?? null,
+        meta?.cardMessageId ?? null,
+        meta?.photoFileId ?? null,
+        meta?.localPhotoPath ?? null,
+        JSON.stringify(data),
+        modelUsed
       );
-    }
 
-    return { invoiceId, totalCalculated };
+      const invoiceId = Number(result.lastInsertRowid);
+
+      const insertItem = this.db.prepare(`
+        INSERT INTO invoice_items (
+          invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const item of data.items) {
+        const sum = item.sum || item.qty * item.price;
+        const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
+        insertItem.run(
+          invoiceId,
+          item.name,
+          normalizeName(item.name),
+          item.qty,
+          item.price,
+          sum,
+          item.unit || 'шт',
+          wh,
+          item.iiko_product_name || null,
+          item.iiko_product_id || null
+        );
+      }
+
+      this.db.exec('COMMIT');
+      return { invoiceId, totalCalculated };
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /**
@@ -173,52 +180,62 @@ export class InvoicesRepository {
       totalCalculated += sum;
     }
 
-    const updateStmt = this.db.prepare(`
-      UPDATE invoices
-      SET supplier = ?, date = ?, warehouse = ?, total_calculated = ?, total_written = ?, raw_json = ?,
-          model_used = COALESCE(?, model_used)
-      WHERE id = ?
-    `);
-    const res = updateStmt.run(
-      data.supplier || 'Не указан',
-      data.date || new Date().toISOString().slice(0, 10),
-      data.warehouse || 'kitchen',
-      totalCalculated,
-      data.total_written ?? null,
-      JSON.stringify(data),
-      data.model_used ?? null,
-      id
-    );
-
-    if (res.changes === 0) return false;
-
-    // Replace items
-    this.db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(id);
-
-    const insertItem = this.db.prepare(`
-      INSERT INTO invoice_items (
-        invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const item of data.items) {
-      const sum = item.sum || item.qty * item.price;
-      const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
-      insertItem.run(
-        id,
-        item.name,
-        normalizeName(item.name),
-        item.qty,
-        item.price,
-        sum,
-        item.unit || 'шт',
-        wh,
-        item.iiko_product_name || null,
-        item.iiko_product_id || null
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const updateStmt = this.db.prepare(`
+        UPDATE invoices
+        SET supplier = ?, date = ?, warehouse = ?, total_calculated = ?, total_written = ?, raw_json = ?,
+            model_used = COALESCE(?, model_used)
+        WHERE id = ?
+      `);
+      const res = updateStmt.run(
+        data.supplier || 'Не указан',
+        data.date || new Date().toISOString().slice(0, 10),
+        data.warehouse || 'kitchen',
+        totalCalculated,
+        data.total_written ?? null,
+        JSON.stringify(data),
+        data.model_used ?? null,
+        id
       );
-    }
 
-    return true;
+      if (res.changes === 0) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+
+      // Replace items
+      this.db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(id);
+
+      const insertItem = this.db.prepare(`
+        INSERT INTO invoice_items (
+          invoice_id, name, normalized_name, qty, price, sum, unit, warehouse, iiko_product_name, iiko_product_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const item of data.items) {
+        const sum = item.sum || item.qty * item.price;
+        const wh = item.warehouse || classifyItemWarehouse(item.name, undefined, data.warehouse || 'kitchen');
+        insertItem.run(
+          id,
+          item.name,
+          normalizeName(item.name),
+          item.qty,
+          item.price,
+          sum,
+          item.unit || 'шт',
+          wh,
+          item.iiko_product_name || null,
+          item.iiko_product_id || null
+        );
+      }
+
+      this.db.exec('COMMIT');
+      return true;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   pushSnapshot(invoiceId: number, data: InvoiceData): void {
@@ -324,34 +341,58 @@ export class InvoicesRepository {
     return res.changes > 0;
   }
 
+  /**
+   * Deletes an invoice and all its items and snapshots atomically.
+   */
+  deleteInvoice(id: number): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?').run(id);
+      this.db.prepare('DELETE FROM invoice_snapshots WHERE invoice_id = ?').run(id);
+      const res = this.db.prepare('DELETE FROM invoices WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+      return res.changes > 0;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   toggleWarehouse(id: number): WarehouseType | null {
     const inv = this.getInvoiceById(id);
     if (!inv) return null;
 
     const newWarehouse: WarehouseType = inv.invoice.warehouse === 'household' ? 'kitchen' : 'household';
-    const stmt = this.db.prepare('UPDATE invoices SET warehouse = ? WHERE id = ?');
-    stmt.run(newWarehouse, id);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const stmt = this.db.prepare('UPDATE invoices SET warehouse = ? WHERE id = ?');
+      stmt.run(newWarehouse, id);
 
-    // Also update all items in this invoice to the new warehouse
-    this.db.prepare('UPDATE invoice_items SET warehouse = ? WHERE invoice_id = ?').run(newWarehouse, id);
+      // Also update all items in this invoice to the new warehouse
+      this.db.prepare('UPDATE invoice_items SET warehouse = ? WHERE invoice_id = ?').run(newWarehouse, id);
 
-    // Update raw_json in invoices if present
-    if (inv.invoice.raw_json) {
-      try {
-        const parsed = JSON.parse(inv.invoice.raw_json);
-        parsed.warehouse = newWarehouse;
-        if (Array.isArray(parsed.items)) {
-          parsed.items.forEach((it: any) => {
-            it.warehouse = newWarehouse;
-          });
+      // Update raw_json in invoices if present
+      if (inv.invoice.raw_json) {
+        try {
+          const parsed = JSON.parse(inv.invoice.raw_json);
+          parsed.warehouse = newWarehouse;
+          if (Array.isArray(parsed.items)) {
+            parsed.items.forEach((it: any) => {
+              it.warehouse = newWarehouse;
+            });
+          }
+          this.db.prepare('UPDATE invoices SET raw_json = ? WHERE id = ?').run(JSON.stringify(parsed), id);
+        } catch {
+          // ignore malformed raw_json
         }
-        this.db.prepare('UPDATE invoices SET raw_json = ? WHERE id = ?').run(JSON.stringify(parsed), id);
-      } catch {
-        // ignore malformed raw_json
       }
-    }
 
-    return newWarehouse;
+      this.db.exec('COMMIT');
+      return newWarehouse;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /**

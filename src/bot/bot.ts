@@ -4,8 +4,13 @@ import { InvoiceWorkflow } from '../workflow/invoice-workflow.js';
 import { formatDailyStats, escapeHtml } from './formatter.js';
 import { InvoiceDataSchema, ModelUsageStat } from '../types/index.js';
 import { InvoicesRepository } from '../db/invoices.repo.js';
-import { checkConfiguredModels, formatModelReportHtml } from '../gemini/model-checker.js';
-import { GeminiAutopilot, formatAutopilotReportHtml } from '../gemini/autopilot.js';
+import {
+  checkConfiguredModels,
+  formatModelReportHtml,
+  GeminiAutopilot,
+  formatAutopilotReportHtml
+} from '../gemini/model-selection.js';
+import { InvoiceQueue } from './invoice-queue.js';
 
 export interface EditSession {
   invoiceId: number;
@@ -25,9 +30,10 @@ export function createInvoiceKeyboard(
     .text('❌ Отклонить', `reject:${invoiceId}`)
     .row();
 
-  const url = webAppUrl || config.webapp.url;
-  if (url) {
-    const fullUrl = url.includes('?') ? `${url}&invoiceId=${invoiceId}` : `${url}?invoiceId=${invoiceId}`;
+  const rawUrl = webAppUrl || config.webapp.url;
+  const isHttps = Boolean(rawUrl && rawUrl.startsWith('https://'));
+  if (isHttps) {
+    const fullUrl = rawUrl.includes('?') ? `${rawUrl}&invoiceId=${invoiceId}` : `${rawUrl}?invoiceId=${invoiceId}`;
     kb.webApp('📱 Редактор (Mini App)', fullUrl);
   } else {
     kb.text('🎙 Наговорить / Написать правку', `edit:${invoiceId}`);
@@ -39,9 +45,9 @@ export function createInvoiceKeyboard(
   }
 
   // Row 3: quick actions (voice/text assistant & undo)
-  if (url || canUndo) {
+  if (isHttps || canUndo) {
     const row3 = kb.row();
-    if (url) {
+    if (isHttps) {
       row3.text('🎙 Наговорить / Написать правку', `edit:${invoiceId}`);
     }
     if (canUndo) {
@@ -54,6 +60,11 @@ export function createInvoiceKeyboard(
 
 export function createEditKeyboard(invoiceId: number, canUndo = false): InlineKeyboard {
   const kb = new InlineKeyboard();
+  const rawUrl = config.webapp.url;
+  if (rawUrl && rawUrl.startsWith('https://')) {
+    const fullUrl = rawUrl.includes('?') ? `${rawUrl}&invoiceId=${invoiceId}` : `${rawUrl}?invoiceId=${invoiceId}`;
+    kb.webApp('📱 Открыть в Mini App', fullUrl).row();
+  }
   if (canUndo) {
     kb.text('↩️ Отменить правку', `undo:${invoiceId}`).row();
   }
@@ -95,6 +106,14 @@ export async function updateTelegramInvoiceCard(
 async function safeReact(ctx: Context, emoji: string): Promise<void> {
   try {
     await ctx.react(emoji as any);
+  } catch {
+    // Silently ignore if reactions are disabled in chat
+  }
+}
+
+async function safeBotReact(bot: Bot, chatId: number, messageId: number, emoji: string): Promise<void> {
+  try {
+    await bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji: emoji as any }]);
   } catch {
     // Silently ignore if reactions are disabled in chat
   }
@@ -160,11 +179,9 @@ async function handleViewPhoto(ctx: Context, workflow: InvoiceWorkflow, invoiceI
 async function handleConfirm(
   ctx: Context,
   workflow: InvoiceWorkflow,
-  invoiceId: number,
-  sessions: Map<number, EditSession>
+  invoiceId: number
 ): Promise<void> {
   const userId = ctx.from?.id || 0;
-  sessions.delete(userId);
   workflow.deleteEditSession(userId);
 
   const card = workflow.getInvoiceCard(invoiceId);
@@ -178,7 +195,23 @@ async function handleConfirm(
     return;
   }
 
+  if (workflow.isSyncInProgress(invoiceId)) {
+    await ctx.answerCallbackQuery({
+      text: '⏳ Накладная уже отправляется в iikoWeb, пожалуйста, подождите...',
+      show_alert: true
+    });
+    return;
+  }
+
   await ctx.answerCallbackQuery({ text: 'Отправляю в iiko...' });
+
+  const inProgressKeyboard = new InlineKeyboard().text(
+    '⏳ Создаю документ в iikoWeb...',
+    `busy:${invoiceId}`
+  );
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: inProgressKeyboard });
+  } catch {}
 
   const result = await workflow.confirmAndSync(invoiceId);
   if (result.success) {
@@ -207,9 +240,19 @@ async function handleConfirm(
         parse_mode: 'HTML'
       });
     }
+  } else if (result.alreadySynced) {
+    // Already synced: remove buttons and notify user
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+    } catch {}
+    await ctx.reply(
+      `⚠️ <b>Накладная уже была создана в iiko!</b>\n${escapeHtml(result.message || '')}`,
+      { parse_mode: 'HTML' }
+    );
   } else if (result.isSplit && result.documentNumber) {
     // Partial split sync: kitchen succeeded, household failed.
     // Database is already in 'synced' state to avoid kitchen duplicates on retry.
+    // Remove buttons to prevent re-sending kitchen
     await safeReact(ctx, '⚠️');
     const baseText = card.cardText;
     const partialCardText = `${baseText}\n\n⚠️ <b>Частично создано в iiko!</b>\n• 🍽 Склад Кухня: <code>${escapeHtml(result.documentNumber)}</code>\n• 🏠 Хоз склад: <i>Ошибка отправки</i>\n\n<i>Накладная кухни создана в iikoWeb. Хоз склад не был добавлен во избежание дублирования.</i>`;
@@ -224,25 +267,38 @@ async function handleConfirm(
       `⚠️ <b>Частичное создание в iiko:</b>\n\n${escapeHtml(result.message || '')}\n\n<i>Накладная «Кухня» уже создана в iikoWeb (#${escapeHtml(result.documentNumber)}). Неотправленные позиции хоз склада можно провести вручную в iikoWeb или прислать отдельным сообщением.</i>`,
       { parse_mode: 'HTML' }
     );
-  } else if (result.unmatched && result.unmatched.length > 0) {
-    await safeReact(ctx, '⚠️');
-    await ctx.reply(
-      `⚠️ <b>Создание в iiko заблокировано:</b>\n\n${escapeHtml(result.message || 'Обнаружены несопоставленные позиции')}\n\n<i>Откройте [📱 Редактор (Mini App)], выберите товары из номенклатуры и нажмите «Создать в iiko».</i>`,
-      { parse_mode: 'HTML' }
-    );
   } else {
-    await safeReact(ctx, '⚠️');
-    await ctx.reply(`⚠️ <b>Ошибка iiko:</b> ${escapeHtml(result.message || 'Неизвестная ошибка')}`, {
-      parse_mode: 'HTML'
-    });
+    // Retryable pre-sync error (unmatched nomenclature, iiko 500, network error): restore buttons so the user can review or retry
+    const restoredCard = workflow.getInvoiceCard(invoiceId);
+    const restoredKeyboard = createInvoiceKeyboard(
+      invoiceId,
+      restoredCard ? Boolean(restoredCard.domain.invoice.photo_file_id || restoredCard.domain.invoice.local_photo_path || workflow.getPhotoPath(invoiceId)) : true,
+      undefined,
+      workflow.canUndo(invoiceId)
+    );
+    try {
+      await ctx.editMessageReplyMarkup({ reply_markup: restoredKeyboard });
+    } catch {}
+
+    if (result.unmatched && result.unmatched.length > 0) {
+      await safeReact(ctx, '⚠️');
+      await ctx.reply(
+        `⚠️ <b>Создание в iiko заблокировано:</b>\n\n${escapeHtml(result.message || 'Обнаружены несопоставленные позиции')}\n\n<i>Откройте [📱 Редактор (Mini App)], выберите товары из номенклатуры и нажмите «Создать в iiko».</i>`,
+        { parse_mode: 'HTML' }
+      );
+    } else {
+      await safeReact(ctx, '⚠️');
+      await ctx.reply(`⚠️ <b>Ошибка iiko:</b> ${escapeHtml(result.message || 'Неизвестная ошибка')}`, {
+        parse_mode: 'HTML'
+      });
+    }
   }
 }
 
 async function handleReject(
   ctx: Context,
   workflow: InvoiceWorkflow,
-  invoiceId: number,
-  sessions: Map<number, EditSession>
+  invoiceId: number
 ): Promise<void> {
   const card = workflow.getInvoiceCard(invoiceId);
   if (card && card.domain.invoice.status === 'synced') {
@@ -257,7 +313,6 @@ async function handleReject(
   }
 
   const userId = ctx.from?.id || 0;
-  sessions.delete(userId);
   workflow.deleteEditSession(userId);
   await safeReact(ctx, '🗑');
   await ctx.answerCallbackQuery({ text: 'Накладная отклонена' });
@@ -314,8 +369,7 @@ async function handleUndo(
 async function handleEditStart(
   ctx: Context,
   workflow: InvoiceWorkflow,
-  invoiceId: number,
-  sessions: Map<number, EditSession>
+  invoiceId: number
 ): Promise<void> {
   const card = workflow.getInvoiceCard(invoiceId);
   if (!card) {
@@ -352,7 +406,6 @@ async function handleEditStart(
   };
 
   const userId = ctx.from?.id || 0;
-  sessions.set(userId, session);
   workflow.saveEditSession(userId, session);
 
   await safeReact(ctx, '✍️');
@@ -386,7 +439,6 @@ async function handleDeleteItem(
   workflow: InvoiceWorkflow,
   invoiceId: number,
   itemIdx: number,
-  sessions: Map<number, EditSession>,
   bot?: Bot
 ): Promise<void> {
   const res = workflow.deleteItem(invoiceId, itemIdx);
@@ -400,7 +452,7 @@ async function handleDeleteItem(
     await updateTelegramInvoiceCard(bot, workflow, invoiceId, res.cardText, !!res.hasPhoto);
   } else {
     const userId = ctx.from?.id || 0;
-    const session = sessions.get(userId) || workflow.getEditSession(userId);
+    const session = workflow.getEditSession(userId);
     if (session?.cardMessageId && session?.chatId && res.cardText) {
       try {
         await ctx.api.editMessageText(session.chatId, session.cardMessageId, res.cardText, {
@@ -453,9 +505,8 @@ async function handleEditRefresh(ctx: Context, workflow: InvoiceWorkflow, invoic
   await ctx.answerCallbackQuery();
 }
 
-async function handleFinishEdit(ctx: Context, workflow: InvoiceWorkflow, sessions: Map<number, EditSession>): Promise<void> {
+async function handleFinishEdit(ctx: Context, workflow: InvoiceWorkflow): Promise<void> {
   const userId = ctx.from?.id || 0;
-  sessions.delete(userId);
   workflow.deleteEditSession(userId);
   try {
     await ctx.editMessageText(
@@ -561,7 +612,30 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
   const bot = new Bot(config.telegram.token);
   const workflow = workflowInstance || new InvoiceWorkflow();
   const repo = workflow.getRepo();
-  const activeEditSessions = new Map<number, EditSession>();
+
+  const invoiceQueue = new InvoiceQueue({
+    workflow,
+    api: bot.api,
+    interTaskDelayMs: 2500,
+    progressIntervalMs: 4000,
+    onInvoiceReady: async (task, result) => {
+      const keyboard = createInvoiceKeyboard(
+        result.invoiceId,
+        result.hasPhoto,
+        undefined,
+        workflow.canUndo(result.invoiceId)
+      );
+      const userId = task.userId || 0;
+      workflow.deleteEditSession(userId);
+
+      await safeBotReact(bot, task.chatId, task.messageId, '⚡');
+      const sentMsg = await bot.api.sendMessage(task.chatId, result.cardText, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard
+      });
+      workflow.updateInvoiceTelegramMessage(result.invoiceId, task.chatId, sentMsg.message_id);
+    }
+  });
 
   // Access control middleware
   bot.use(async (ctx, next) => {
@@ -644,7 +718,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
   // /app or /webapp command
   bot.command(['app', 'webapp'], async (ctx) => {
     const webappUrl = config.webapp.url;
-    if (webappUrl) {
+    if (webappUrl && webappUrl.startsWith('https://')) {
       const kb = new InlineKeyboard().webApp('📱 Открыть редактор накладных', webappUrl);
       await ctx.reply(
         '📱 <b>Telegram Mini App (WebApp)</b>\n\n' +
@@ -661,12 +735,19 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         }
       );
     } else {
+      const localPort = config.webapp.port;
       await ctx.reply(
         'ℹ️ <b>Telegram Mini App редактор</b>\n\n' +
-        'Сервер Mini App активен локально на порту <code>' + config.webapp.port + '</code>.\n\n' +
-        'Чтобы кнопка открывалась прямо внутри Telegram на смартфонах персонала, укажите в файле <code>.env</code> публичный HTTPS-адрес:\n' +
-        '<code>WEBAPP_URL=https://ваш-домен-или-туннель.ru</code>\n\n' +
-        '<i>Пока URL не настроен, вы можете редактировать накладные текстом по кнопке [✏️ Редактировать].</i>',
+        `Локальный веб-сервер Mini App активен на порту <code>${localPort}</code>.\n\n` +
+        '<b>Почему кнопка недоступна внутри Telegram?</b>\n' +
+        'Telegram требует обязательный публичный <b>HTTPS-адрес</b> (политика безопасности Telegram запрещает открытие <code>http://localhost</code> внутри мессенджера).\n\n' +
+        '<b>Как подключить за 1 минуту:</b>\n' +
+        '1️⃣ <b>В облаке (Amvera):</b> укажите в переменных окружения:\n' +
+        '<code>WEBAPP_URL=https://&lt;домен-amvera&gt;</code>\n\n' +
+        '2️⃣ <b>При локальном запуске (на ПК):</b> запустите бесплатный туннель:\n' +
+        `<code>npx localtunnel --port ${localPort}</code>\n` +
+        'и скопируйте полученную ссылку в <code>.env</code> в переменную <code>WEBAPP_URL</code>.\n\n' +
+        `<i>Для проверки прямо сейчас в браузере на этом ПК: <a href="http://localhost:${localPort}/webapp">http://localhost:${localPort}/webapp</a></i>`,
         { parse_mode: 'HTML' }
       );
     }
@@ -714,14 +795,10 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
     });
   });
 
-  // Photo handler
+  // Photo handler with sequential queue
   bot.on('message:photo', async (ctx) => {
     await safeReact(ctx, '👀');
     await safeAction(ctx, 'upload_photo');
-
-    const statusMsg = await ctx.reply('🔍 <i>Распознаю накладную через нейросеть...</i>', {
-      parse_mode: 'HTML'
-    });
 
     try {
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -740,44 +817,27 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       const photoBuffer = Buffer.from(arrayBuf);
       console.log(`[Photo] Получено фото от @${ctx.from?.username || ctx.from?.id}: ${photo.file_id}, размер: ${(photoBuffer.length / 1024).toFixed(1)} КБ`);
 
-      const result = await workflow.processPhotoInvoice({
-        photoBuffer,
+      await invoiceQueue.enqueuePhoto({
+        chatId: ctx.chat.id,
         userId: ctx.from?.id,
         messageId: ctx.message.message_id,
-        photoFileId: photo.file_id
+        photoBuffer,
+        photoFileId: photo.file_id,
+        caption: ctx.message.caption?.trim()
+      }).catch((queueErr) => {
+        // Ошибка распознавания уже выведена пользователю через статусное сообщение очереди
+        console.warn(`[Photo] Ошибка распознавания накладной #${photo.file_id}:`, queueErr?.message || queueErr);
       });
-
-      const keyboard = createInvoiceKeyboard(result.invoiceId, result.hasPhoto);
-      const userId = ctx.from?.id || 0;
-      activeEditSessions.delete(userId);
-      workflow.deleteEditSession(userId);
-
-      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
-      await safeReact(ctx, '⚡');
-      const sentMsg = await ctx.reply(result.cardText, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard
-      });
-      workflow.updateInvoiceTelegramMessage(result.invoiceId, ctx.chat.id, sentMsg.message_id);
     } catch (err: any) {
-      console.error('Ошибка обработки фото:', err);
-      try {
-        await ctx.api.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          `❌ <b>Ошибка распознавания:</b> ${escapeHtml(err.message || String(err))}`,
-          { parse_mode: 'HTML' }
-        );
-      } catch {
-        await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
-      }
+      console.error('Ошибка добавления фото в очередь:', err);
+      await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
     }
   });
 
   // Voice handler
   bot.on('message:voice', async (ctx) => {
     const userId = ctx.from?.id || 0;
-    const session = activeEditSessions.get(userId) || workflow.getEditSession(userId);
+    const session = workflow.getEditSession(userId);
     let editInvoiceId: number | null = session ? session.invoiceId : null;
     let cardMessageId: number | null = session ? session.cardMessageId : null;
     let chatId: number = session ? session.chatId : (ctx.chat?.id || 0);
@@ -820,7 +880,14 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
         await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
 
         if (!res.success || !res.editableText) {
-          await ctx.reply(`⚠️ ${escapeHtml(res.message)}`, { parse_mode: 'HTML' });
+          await ctx.reply(
+            `⚠️ <b>Не удалось применить голосовую правку:</b>\n\n${escapeHtml(res.message)}\n\n` +
+            `<i>Попробуйте наговорить ещё раз или отправьте текстовую команду (например: <code>1: 15 * 600</code>).</i>`,
+            {
+              parse_mode: 'HTML',
+              reply_markup: createEditKeyboard(editInvoiceId, workflow.canUndo(editInvoiceId))
+            }
+          );
           return;
         }
 
@@ -854,13 +921,9 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
       }
     }
 
-    // New invoice voice recognition
+    // New invoice voice recognition with queue
     await safeReact(ctx, '👂');
     await safeAction(ctx, 'record_voice');
-
-    const statusMsg = await ctx.reply('🎙 <i>Слушаю голосовую накладную через нейросеть...</i>', {
-      parse_mode: 'HTML'
-    });
 
     try {
       const voice = ctx.message.voice;
@@ -877,38 +940,23 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
       const audioBuf = Buffer.from(await audioRes.arrayBuffer());
 
-      const result = await workflow.processVoiceInvoice({
-        audioBuffer: audioBuf,
-        mimeType: 'audio/ogg',
+      await invoiceQueue.enqueueVoice({
+        chatId: ctx.chat.id,
         userId: ctx.from?.id,
-        messageId: ctx.message.message_id
+        messageId: ctx.message.message_id,
+        audioBuffer: audioBuf,
+        audioMimeType: 'audio/ogg'
+      }).catch((queueErr) => {
+        // Ошибка распознавания уже выведена пользователю через статусное сообщение очереди
+        console.warn('[Voice] Ошибка распознавания голоса из очереди:', queueErr?.message || queueErr);
       });
-
-      const keyboard = createInvoiceKeyboard(result.invoiceId, false, undefined, workflow.canUndo(result.invoiceId));
-      activeEditSessions.delete(userId);
-      workflow.deleteEditSession(userId);
-
-      await ctx.api.deleteMessage(ctx.chat.id, statusMsg.message_id);
-      await safeReact(ctx, '⚡');
-      const sentMsg = await ctx.reply(result.cardText, {
-        parse_mode: 'HTML',
-        reply_markup: keyboard
-      });
-      workflow.updateInvoiceTelegramMessage(result.invoiceId, ctx.chat.id, sentMsg.message_id);
     } catch (err: any) {
-      console.error('Ошибка голосового распознавания:', err);
-      try {
-        await ctx.api.editMessageText(
-          ctx.chat.id,
-          statusMsg.message_id,
-          `❌ <b>Ошибка распознавания голоса:</b> ${escapeHtml(err.message || String(err))}`,
-          { parse_mode: 'HTML' }
-        );
-      } catch {
-        await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
-      }
+      console.error('Ошибка постановки голоса в очередь:', err);
+      await ctx.reply(`❌ <b>Ошибка:</b> ${escapeHtml(err.message || String(err))}`, { parse_mode: 'HTML' });
     }
   });
+
+  const inFlightCallbacks = new Set<string>();
 
   // Callback query dispatcher
   bot.on('callback_query:data', async (ctx) => {
@@ -923,36 +971,58 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
     const [action, idStr, extra] = data.split(':');
     const invoiceId = parseInt(idStr, 10);
 
+    if (action === 'busy') {
+      await ctx.answerCallbackQuery({
+        text: '⏳ Накладная отправляется в iikoWeb, пожалуйста, подождите...',
+        show_alert: false
+      });
+      return;
+    }
+
     if (isNaN(invoiceId)) {
       await ctx.answerCallbackQuery({ text: 'Некорректный ID накладной' });
       return;
     }
 
-    switch (action) {
-      case 'toggle_wh':
-        return handleToggleWh(ctx, workflow, invoiceId);
-      case 'view_photo':
-        return handleViewPhoto(ctx, workflow, invoiceId);
-      case 'undo':
-        return handleUndo(ctx, workflow, invoiceId, bot);
-      case 'confirm':
-        return handleConfirm(ctx, workflow, invoiceId, activeEditSessions);
-      case 'reject':
-        return handleReject(ctx, workflow, invoiceId, activeEditSessions);
-      case 'edit':
-        return handleEditStart(ctx, workflow, invoiceId, activeEditSessions);
-      case 'del_picker':
-        return handleDeletePicker(ctx, workflow, invoiceId);
-      case 'del_item': {
-        const itemIdx = parseInt(extra, 10);
-        return handleDeleteItem(ctx, workflow, invoiceId, itemIdx, activeEditSessions, bot);
+    const callbackLockKey = `${invoiceId}:${action}`;
+    if (inFlightCallbacks.has(callbackLockKey) || (action === 'confirm' && workflow.isSyncInProgress(invoiceId))) {
+      await ctx.answerCallbackQuery({
+        text: '⏳ Запрос уже обрабатывается, пожалуйста, подождите...',
+        show_alert: false
+      });
+      return;
+    }
+
+    inFlightCallbacks.add(callbackLockKey);
+    try {
+      switch (action) {
+        case 'toggle_wh':
+          return await handleToggleWh(ctx, workflow, invoiceId);
+        case 'view_photo':
+          return await handleViewPhoto(ctx, workflow, invoiceId);
+        case 'undo':
+          return await handleUndo(ctx, workflow, invoiceId, bot);
+        case 'confirm':
+          return await handleConfirm(ctx, workflow, invoiceId);
+        case 'reject':
+          return await handleReject(ctx, workflow, invoiceId);
+        case 'edit':
+          return await handleEditStart(ctx, workflow, invoiceId);
+        case 'del_picker':
+          return await handleDeletePicker(ctx, workflow, invoiceId);
+        case 'del_item': {
+          const itemIdx = parseInt(extra, 10);
+          return await handleDeleteItem(ctx, workflow, invoiceId, itemIdx, bot);
+        }
+        case 'edit_refresh':
+          return await handleEditRefresh(ctx, workflow, invoiceId);
+        case 'finish_edit':
+          return await handleFinishEdit(ctx, workflow);
+        default:
+          await ctx.answerCallbackQuery({ text: 'Неизвестная команда' });
       }
-      case 'edit_refresh':
-        return handleEditRefresh(ctx, workflow, invoiceId);
-      case 'finish_edit':
-        return handleFinishEdit(ctx, workflow, activeEditSessions);
-      default:
-        await ctx.answerCallbackQuery({ text: 'Неизвестная команда' });
+    } finally {
+      inFlightCallbacks.delete(callbackLockKey);
     }
   });
 
@@ -1023,7 +1093,7 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
     }
 
     const userId = ctx.from?.id || 0;
-    const session = activeEditSessions.get(userId) || workflow.getEditSession(userId);
+    const session = workflow.getEditSession(userId);
     let invoiceId: number | null = session ? session.invoiceId : null;
     let cardMessageId: number | null = session ? session.cardMessageId : null;
     let chatId: number = session ? session.chatId : (ctx.chat?.id || 0);
@@ -1064,7 +1134,13 @@ export function createBot(workflowInstance?: InvoiceWorkflow): Bot {
 
     const res = await workflow.applyHybridEdit(invoiceId, ctx.message.text);
     if (!res.success || !res.editableText) {
-      await ctx.reply(`⚠️ ${escapeHtml(res.message)}`, { parse_mode: 'HTML' });
+      await ctx.reply(
+        `⚠️ <b>Не удалось применить правку:</b>\n\n${escapeHtml(res.message)}`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: createEditKeyboard(invoiceId, workflow.canUndo(invoiceId))
+        }
+      );
       return;
     }
 

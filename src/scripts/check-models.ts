@@ -1,4 +1,4 @@
-import { GeminiAutopilot, formatAutopilotReportConsole } from '../gemini/autopilot.js';
+import { GeminiAutopilot, formatAutopilotReportConsole } from '../gemini/model-selection.js';
 
 async function main() {
   console.log('Запуск динамического автопилота Gemini...\n');

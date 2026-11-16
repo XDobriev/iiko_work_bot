@@ -5,19 +5,113 @@ export interface ParseEditResult {
   success: boolean;
   data?: InvoiceData;
   message: string;
+  isDeterministicError?: boolean;
 }
 
 /**
  * Safely evaluates math expressions like "4*6.5", "1250/5", "10+2.5", "3*0.38"
+ * using a deterministic recursive-descent parser (zero eval / new Function).
  */
 export function evaluateMath(raw: string): number | null {
   const cleaned = raw.trim().replace(/\s+/g, '').replace(/,/g, '.');
-  if (!/^[\d.+\-*/()]+$/.test(cleaned)) {
+  if (!cleaned || !/^[\d.+\-*/()]+$/.test(cleaned)) {
     return null;
   }
+
+  // Tokenize
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < cleaned.length) {
+    const ch = cleaned[i];
+    if (ch === '+' || ch === '-' || ch === '*' || ch === '/' || ch === '(' || ch === ')') {
+      tokens.push(ch);
+      i++;
+    } else if ((ch >= '0' && ch <= '9') || ch === '.') {
+      let numStr = '';
+      let hasDot = false;
+      while (i < cleaned.length && ((cleaned[i] >= '0' && cleaned[i] <= '9') || cleaned[i] === '.')) {
+        if (cleaned[i] === '.') {
+          if (hasDot) return null; // e.g. 1.2.3
+          hasDot = true;
+        }
+        numStr += cleaned[i];
+        i++;
+      }
+      tokens.push(numStr);
+    } else {
+      return null;
+    }
+  }
+
+  let pos = 0;
+
+  function peek(): string | undefined {
+    return tokens[pos];
+  }
+
+  function consume(): string {
+    return tokens[pos++];
+  }
+
+  function parseExpression(): number {
+    let left = parseTerm();
+    while (pos < tokens.length && (peek() === '+' || peek() === '-')) {
+      const op = consume();
+      const right = parseTerm();
+      if (op === '+') {
+        left += right;
+      } else {
+        left -= right;
+      }
+    }
+    return left;
+  }
+
+  function parseTerm(): number {
+    let left = parseFactor();
+    while (pos < tokens.length && (peek() === '*' || peek() === '/')) {
+      const op = consume();
+      const right = parseFactor();
+      if (op === '*') {
+        left *= right;
+      } else {
+        if (right === 0) throw new Error('Division by zero');
+        left /= right;
+      }
+    }
+    return left;
+  }
+
+  function parseFactor(): number {
+    if (pos >= tokens.length) throw new Error('Unexpected end');
+    if (peek() === '+') {
+      consume();
+      return parseFactor();
+    }
+    if (peek() === '-') {
+      consume();
+      return -parseFactor();
+    }
+    return parsePrimary();
+  }
+
+  function parsePrimary(): number {
+    const t = peek();
+    if (!t) throw new Error('Unexpected end of expression');
+    if (t === '(') {
+      consume(); // '('
+      const val = parseExpression();
+      if (consume() !== ')') throw new Error('Expected )');
+      return val;
+    }
+    const num = Number(consume());
+    if (isNaN(num)) throw new Error('Invalid number');
+    return num;
+  }
+
   try {
-    const fn = new Function(`return (${cleaned});`);
-    const val = Number(fn());
+    const val = parseExpression();
+    if (pos !== tokens.length) return null;
     return isNaN(val) || !isFinite(val) ? null : Math.round(val * 1000) / 1000;
   } catch {
     return null;
@@ -177,7 +271,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
     if (delMatch) {
       const idx = parseInt(delMatch[1], 10) - 1;
       if (idx < 0 || idx >= updated.items.length) {
-        return { success: false, message: `Строка #${idx + 1} не найдена. Всего строк: ${updated.items.length}.` };
+        return {
+          success: false,
+          isDeterministicError: true,
+          message: `Строка #${idx + 1} не найдена. Всего в накладной строк: ${updated.items.length}. Проверьте номер в карточке выше.`
+        };
       }
       const removed = updated.items.splice(idx, 1)[0];
       return {
@@ -200,15 +298,30 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
       return { success: true, data: updated, message: `Дата изменена на «${updated.date}».` };
     }
 
-    const whMatch = single.match(/^склад\s*[:\-–]\s*(кухня|хоз|хозсклад|kitchen|household)/i);
+    const whMatch = single.match(/^склад\s*[:\-–]\s*(.+)$/i);
     if (whMatch) {
-      const val = whMatch[1].toLowerCase();
-      const newWh: WarehouseType = (val.includes('хоз') || val.includes('house')) ? 'household' : 'kitchen';
-      updated.warehouse = newWh;
-      for (const it of updated.items) {
-        it.warehouse = newWh;
+      const val = whMatch[1].trim().toLowerCase();
+      if (val.includes('хоз') || val.includes('house')) {
+        const newWh: WarehouseType = 'household';
+        updated.warehouse = newWh;
+        for (const it of updated.items) {
+          it.warehouse = newWh;
+        }
+        return { success: true, data: updated, message: `Склад изменен на «Хоз склад».` };
+      } else if (val.includes('кухн') || val.includes('kitchen')) {
+        const newWh: WarehouseType = 'kitchen';
+        updated.warehouse = newWh;
+        for (const it of updated.items) {
+          it.warehouse = newWh;
+        }
+        return { success: true, data: updated, message: `Склад изменен на «Склад Кухня».` };
+      } else {
+        return {
+          success: false,
+          isDeterministicError: true,
+          message: `Неизвестный склад «${whMatch[1].trim()}». Укажите «Склад: Кухня» или «Склад: Хоз».`
+        };
       }
-      return { success: true, data: updated, message: `Склад изменен на «${newWh === 'household' ? 'Хоз склад' : 'Склад Кухня'}».` };
     }
 
     // 1b-2. Item warehouse command: e.g. "1: склад хоз", "1 склад кухня", "1 хоз", "1 кухня", "#1 - хоз", "1 - хоз"
@@ -216,7 +329,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
     if (whItemMatch) {
       const idx = parseInt(whItemMatch[1], 10) - 1;
       if (idx < 0 || idx >= updated.items.length) {
-        return { success: false, message: `Строка #${idx + 1} не найдена. Всего строк: ${updated.items.length}.` };
+        return {
+          success: false,
+          isDeterministicError: true,
+          message: `Строка #${idx + 1} не найдена. Всего в накладной строк: ${updated.items.length}.`
+        };
       }
       const val = whItemMatch[2].toLowerCase();
       const newWh: WarehouseType = (val.includes('хоз') || val.includes('house')) ? 'household' : 'kitchen';
@@ -297,6 +414,14 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
           }
         }
       }
+
+      return {
+        success: false,
+        isDeterministicError: true,
+        message: rest
+          ? `Чтобы добавить «${rest}», укажите количество и цену. Например: «+ ${rest} 5 * 180» или «+ ${rest} 5 180».`
+          : 'Для добавления позиции укажите название, количество и цену. Например: «+ Томаты 5 * 180» или «+ Томаты 5 180».'
+      };
     }
 
     // 1d. Edit single item by index: e.g. "1: 15 * 600", "1: 4*6.5кг * 250", "1: 380г = 180", "1: Оливки 1 бан * 180"
@@ -304,7 +429,11 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
     if (lineIdxMatch) {
       const idx = parseInt(lineIdxMatch[1], 10) - 1;
       if (idx < 0 || idx >= updated.items.length) {
-        return { success: false, message: `Строка #${idx + 1} не найдена. Всего строк: ${updated.items.length}.` };
+        return {
+          success: false,
+          isDeterministicError: true,
+          message: `Строка #${idx + 1} не найдена. Всего в накладной строк: ${updated.items.length}.`
+        };
       }
 
       const rest = lineIdxMatch[2].trim();
@@ -410,6 +539,12 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
           }
         }
       }
+
+      return {
+        success: false,
+        isDeterministicError: true,
+        message: `Для изменения строки #${idx + 1} («${updated.items[idx].name}») укажите количество и цену (например: «${idx + 1}: 15 * 600» или «${idx + 1} 15 600»).`
+      };
     }
   }
 
@@ -504,14 +639,16 @@ export function parseInvoiceEditText(rawText: string, current: InvoiceData): Par
   return {
     success: false,
     message:
-      'Не удалось распознать формат строки.\n\n' +
-      'Примеры команд и формул:\n' +
-      '• <code>1: 15кг * 600</code> — кол-во, единица и цена\n' +
-      '• <code>1: 4*6.5кг * 250</code> — формула (4 коробки по 6.5 кг)\n' +
-      '• <code>1: 18.5кг = 7400</code> — расчет цены по общему весу и сумме\n' +
-      '• <code>1: 380г = 180</code> — перевод грамм в кг (0.38 кг = 180 ₽)\n' +
-      '• <code>1: 1бан * 180</code> — фиксация тары (банка, пачка, штука)\n' +
-      '• <code>удалить 2</code> — удалить строку 2\n' +
-      '• <code>+ Зелень 5 * 80</code> — добавить новую строку'
+      'Не удалось распознать формат команды.\n\n' +
+      'Примеры команд:\n' +
+      '• 1: 15 * 600 — изменить строку 1 (кол-во * цена)\n' +
+      '• 1 15 600 — короткий формат (строка кол-во цена)\n' +
+      '• 1: 4*6.5кг * 250 — формула веса (4 кор. по 6.5 кг)\n' +
+      '• 1: 18.5кг = 7400 — расчет цены из общей суммы\n' +
+      '• 1: 380г = 180 — автоматический перевод грамм в кг\n' +
+      '• 1 склад хоз — перевести строку на Хоз склад\n' +
+      '• удалить 2 — удалить строку 2\n' +
+      '• + Сыр 2 * 350 — добавить позицию\n' +
+      '• поставщик: Название — сменить поставщика'
   };
 }
