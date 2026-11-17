@@ -4,34 +4,32 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Редактор накладной — Бейни</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg-color: var(--tg-theme-bg-color, #f4f5f7);
-      --secondary-bg: var(--tg-theme-secondary-bg-color, #ffffff);
-      --text-color: var(--tg-theme-text-color, #1a1a1a);
-      --hint-color: var(--tg-theme-hint-color, #8e8e93);
-      --btn-color: var(--tg-theme-button-color, #007aff);
-      --btn-text: var(--tg-theme-button-text-color, #ffffff);
-      --border-color: rgba(0, 0, 0, 0.08);
-      --card-radius: 14px;
-      --danger-color: #ff3b30;
-      --success-color: #34c759;
-      --warning-color: #ff9500;
-      --accent-kitchen: #007aff;
-      --accent-house: #ff9500;
-      --chip-bg: rgba(0, 0, 0, 0.05);
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg-color: var(--tg-theme-bg-color, #121214);
-        --secondary-bg: var(--tg-theme-secondary-bg-color, #1c1c1e);
-        --text-color: var(--tg-theme-text-color, #f5f5f7);
-        --hint-color: var(--tg-theme-hint-color, #98989d);
-        --border-color: rgba(255, 255, 255, 0.12);
-        --chip-bg: rgba(255, 255, 255, 0.08);
-      }
+      /* Beyni Craft Ledger Design System (Onyx & Bronze) */
+      --bg-color: #101012;
+      --secondary-bg: #17171a;
+      --elevated-bg: #202025;
+      --text-color: #f5f5f7;
+      --hint-color: #9ca3af;
+      --muted-color: #6b7280;
+      --btn-color: #d4a373;
+      --btn-hover: #e0a96d;
+      --btn-text: #101012;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --card-radius: 12px;
+      --danger-color: #f87171;
+      --success-color: #34d399;
+      --warning-color: #fbbf24;
+      --accent-kitchen: #38bdf8;
+      --accent-house: #fbbf24;
+      --chip-bg: rgba(255, 255, 255, 0.04);
+      --mono-font: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     * {
@@ -42,12 +40,13 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: var(--font-family);
       background-color: var(--bg-color);
       color: var(--text-color);
       padding: calc(12px + env(safe-area-inset-top, 0px)) 14px calc(90px + env(safe-area-inset-bottom, 14px)) 14px;
       line-height: 1.4;
       min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }
 
     .container {
@@ -59,10 +58,25 @@
     .header-card {
       background: var(--secondary-bg);
       border-radius: var(--card-radius);
-      padding: 16px;
+      padding: 14px 16px;
       margin-bottom: 12px;
       border: 1px solid var(--border-color);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 4px 16px rgba(0, 0, 0, 0.3);
+    }
+
+    .brand-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+
+    .brand-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--btn-color);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
     }
 
     .header-top {
@@ -81,11 +95,19 @@
     }
 
     .invoice-title {
-      font-size: 19px;
+      font-size: 18px;
       font-weight: 700;
       display: flex;
       align-items: center;
       gap: 6px;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+    }
+
+    #invoice-id-display {
+      font-family: var(--mono-font);
+      font-variant-numeric: tabular-nums;
+      color: var(--btn-color);
     }
 
     .invoice-picker-select {
@@ -94,7 +116,7 @@
       color: var(--text-color);
       border-radius: 8px;
       padding: 4px 8px;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       outline: none;
       cursor: pointer;
@@ -102,13 +124,16 @@
     }
 
     .badge-status {
-      font-size: 12px;
-      font-weight: 600;
+      font-size: 10px;
+      font-weight: 700;
       padding: 3px 8px;
-      border-radius: 12px;
-      background: rgba(0, 122, 255, 0.12);
+      border-radius: 6px;
+      background: rgba(212, 163, 115, 0.12);
       color: var(--btn-color);
+      border: 1px solid rgba(212, 163, 115, 0.25);
       white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
     }
 
     .form-group {
@@ -116,11 +141,11 @@
     }
 
     .form-label {
-      font-size: 11px;
-      font-weight: 600;
+      font-size: 10px;
+      font-weight: 700;
       color: var(--hint-color);
       text-transform: uppercase;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.05em;
       margin-bottom: 4px;
       display: block;
     }
@@ -132,25 +157,27 @@
 
     input, select {
       width: 100%;
-      background: var(--bg-color);
+      background: #121215;
       border: 1px solid var(--border-color);
       color: var(--text-color);
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 15px;
+      border-radius: 8px;
+      padding: 9px 11px;
+      font-size: 14px;
       outline: none;
-      transition: border-color 0.15s ease;
+      transition: all 0.15s ease;
+      font-family: inherit;
     }
 
     input:focus, select:focus {
       border-color: var(--btn-color);
+      box-shadow: 0 0 0 2px rgba(212, 163, 115, 0.15);
     }
 
     /* Warehouse Toggle */
     .warehouse-toggle {
       display: flex;
-      background: var(--bg-color);
-      border-radius: 10px;
+      background: #121215;
+      border-radius: 8px;
       padding: 3px;
       gap: 4px;
       margin-top: 4px;
@@ -159,39 +186,41 @@
 
     .wh-option {
       flex: 1;
-      padding: 8px 10px;
-      border-radius: 8px;
-      font-size: 13px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 12px;
       font-weight: 600;
       text-align: center;
       cursor: pointer;
-      border: none;
+      border: 1px solid transparent;
       background: transparent;
       color: var(--hint-color);
-      transition: all 0.2s ease;
+      transition: all 0.15s ease;
     }
 
     .wh-option.active {
-      background: var(--secondary-bg);
       color: var(--text-color);
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
     }
 
     .wh-option.active.kitchen {
+      background: rgba(56, 189, 248, 0.12);
       color: var(--accent-kitchen);
+      border-color: rgba(56, 189, 248, 0.3);
     }
 
     .wh-option.active.household {
+      background: rgba(251, 191, 36, 0.12);
       color: var(--accent-house);
+      border-color: rgba(251, 191, 36, 0.3);
     }
 
     /* Items Section */
     .section-title {
-      font-size: 14px;
+      font-size: 11px;
       font-weight: 700;
       color: var(--hint-color);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.08em;
       margin: 16px 4px 8px 4px;
       display: flex;
       justify-content: space-between;
@@ -201,10 +230,10 @@
     .item-card {
       background: var(--secondary-bg);
       border-radius: var(--card-radius);
-      padding: 12px 14px;
-      margin-bottom: 10px;
+      padding: 11px 13px;
+      margin-bottom: 8px;
       border: 1px solid var(--border-color);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 2px 6px rgba(0, 0, 0, 0.2);
       transition: transform 0.15s ease, opacity 0.15s ease;
     }
 
@@ -222,17 +251,19 @@
     }
 
     .item-num {
-      font-size: 12px;
+      font-family: var(--mono-font);
+      font-size: 11px;
       font-weight: 700;
-      background: var(--bg-color);
-      color: var(--hint-color);
-      padding: 2px 7px;
-      border-radius: 6px;
+      background: rgba(212, 163, 115, 0.12);
+      color: var(--btn-color);
+      padding: 2px 6px;
+      border-radius: 5px;
+      border: 1px solid rgba(212, 163, 115, 0.2);
     }
 
     .item-name-input {
       font-weight: 600;
-      font-size: 15px;
+      font-size: 14px;
       flex: 1;
     }
 
@@ -240,24 +271,27 @@
       background: transparent;
       border: none;
       color: var(--danger-color);
-      font-size: 18px;
-      padding: 4px 8px;
+      font-size: 16px;
+      padding: 4px 6px;
       cursor: pointer;
       border-radius: 6px;
       display: flex;
       align-items: center;
       justify-content: center;
+      opacity: 0.75;
+      transition: opacity 0.15s ease;
     }
 
     .btn-del:active {
-      background: rgba(255, 59, 48, 0.1);
+      opacity: 1;
+      background: rgba(248, 113, 113, 0.12);
     }
 
     .item-wh-badge {
       font-size: 11px;
       font-weight: 600;
-      padding: 4px 8px;
-      border-radius: 8px;
+      padding: 3px 7px;
+      border-radius: 6px;
       border: 1px solid var(--border-color);
       cursor: pointer;
       display: inline-flex;
@@ -265,32 +299,32 @@
       gap: 3px;
       white-space: nowrap;
       transition: all 0.15s ease;
-      background: var(--bg-color);
+      background: #121215;
       color: var(--text-color);
     }
 
     .item-wh-badge.kitchen {
-      background: rgba(0, 122, 255, 0.12);
+      background: rgba(56, 189, 248, 0.12);
       color: var(--accent-kitchen);
-      border-color: rgba(0, 122, 255, 0.25);
+      border-color: rgba(56, 189, 248, 0.25);
     }
 
     .item-wh-badge.household {
-      background: rgba(255, 149, 0, 0.15);
+      background: rgba(251, 191, 36, 0.12);
       color: var(--accent-house);
-      border-color: rgba(255, 149, 0, 0.35);
+      border-color: rgba(251, 191, 36, 0.25);
     }
 
     /* iiko Nomenclature Matcher Bar */
     .iiko-matcher-box {
-      background: var(--chip-bg);
+      background: rgba(255, 255, 255, 0.02);
       border-radius: 8px;
       padding: 6px 10px;
       margin-bottom: 8px;
       display: flex;
       flex-direction: column;
       gap: 6px;
-      border: 1px dashed var(--border-color);
+      border: 1px dashed rgba(255, 255, 255, 0.1);
     }
 
     .iiko-matcher-row {
@@ -431,8 +465,8 @@
     .stepper-container {
       display: flex;
       align-items: center;
-      background: var(--bg-color);
-      border-radius: 8px;
+      background: #121215;
+      border-radius: 7px;
       border: 1px solid var(--border-color);
       overflow: hidden;
     }
@@ -441,18 +475,19 @@
       background: transparent;
       border: none;
       color: var(--btn-color);
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 700;
-      width: 28px;
-      height: 34px;
+      width: 26px;
+      height: 32px;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: background 0.15s ease;
     }
 
     .stepper-btn:active {
-      background: rgba(0, 0, 0, 0.05);
+      background: rgba(212, 163, 115, 0.15);
     }
 
     .stepper-input {
@@ -460,16 +495,22 @@
       background: transparent;
       text-align: center;
       padding: 4px 2px;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
       width: 100%;
+      font-family: var(--mono-font);
+      color: var(--text-color);
+      font-variant-numeric: tabular-nums;
     }
 
     .unit-select {
-      padding: 6px 4px;
-      font-size: 13px;
+      padding: 4px 6px;
+      font-size: 12px;
       font-weight: 500;
-      height: 36px;
+      height: 32px;
+      background: #121215;
+      border: 1px solid var(--border-color);
+      border-radius: 7px;
     }
 
     .price-input-wrapper {
@@ -479,39 +520,46 @@
     }
 
     .price-input {
-      padding-right: 22px;
-      font-size: 14px;
+      padding-right: 20px;
+      font-size: 13px;
       font-weight: 600;
-      height: 36px;
+      height: 32px;
       text-align: right;
+      font-family: var(--mono-font);
+      font-variant-numeric: tabular-nums;
+      background: #121215;
+      border: 1px solid var(--border-color);
+      border-radius: 7px;
     }
 
     .currency-sign {
       position: absolute;
-      right: 8px;
-      font-size: 13px;
+      right: 7px;
+      font-size: 12px;
       color: var(--hint-color);
       pointer-events: none;
     }
 
     .line-sum-box {
       text-align: right;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 700;
-      color: var(--text-color);
-      padding: 6px 4px;
+      color: var(--btn-color);
+      font-family: var(--mono-font);
+      font-variant-numeric: tabular-nums;
+      padding: 6px 2px;
       white-space: nowrap;
     }
 
     /* Add Item Button */
     .btn-add-item {
       width: 100%;
-      background: var(--secondary-bg);
-      border: 2px dashed var(--border-color);
+      background: #17171a;
+      border: 1px dashed rgba(212, 163, 115, 0.35);
       color: var(--btn-color);
-      padding: 13px;
+      padding: 11px;
       border-radius: var(--card-radius);
-      font-size: 15px;
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
       display: flex;
@@ -524,16 +572,18 @@
 
     .btn-add-item:active {
       transform: scale(0.98);
-      background: rgba(0, 122, 255, 0.05);
+      background: rgba(212, 163, 115, 0.08);
+      border-color: var(--btn-color);
     }
 
     /* Summary Card */
     .summary-card {
-      background: var(--secondary-bg);
+      background: linear-gradient(180deg, #17171a 0%, #121215 100%);
       border-radius: var(--card-radius);
       padding: 16px;
       margin-top: 14px;
-      border: 1px solid var(--border-color);
+      border: 1px solid rgba(212, 163, 115, 0.25);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
     }
 
     .summary-row {
@@ -544,23 +594,26 @@
     }
 
     .summary-total-label {
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 700;
+      letter-spacing: -0.01em;
     }
 
     .summary-total-val {
-      font-size: 24px;
+      font-size: 26px;
       font-weight: 800;
-      color: var(--text-color);
+      color: var(--btn-color);
+      font-family: var(--mono-font);
+      font-variant-numeric: tabular-nums;
     }
 
     .written-warning {
-      background: rgba(255, 149, 0, 0.12);
-      border: 1px solid rgba(255, 149, 0, 0.3);
-      color: #b36200;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.3);
+      color: #fbbf24;
       padding: 8px 12px;
       border-radius: 8px;
-      font-size: 13px;
+      font-size: 12px;
       margin-top: 8px;
       display: flex;
       align-items: center;
@@ -568,12 +621,12 @@
     }
 
     .written-match {
-      background: rgba(52, 199, 89, 0.12);
-      border: 1px solid rgba(52, 199, 89, 0.3);
-      color: #1b8535;
+      background: rgba(52, 211, 153, 0.12);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      color: #34d399;
       padding: 8px 12px;
       border-radius: 8px;
-      font-size: 13px;
+      font-size: 12px;
       margin-top: 8px;
     }
 
@@ -583,9 +636,11 @@
       bottom: 0;
       left: 0;
       right: 0;
-      background: var(--secondary-bg);
+      background: rgba(23, 23, 26, 0.9);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
       padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
-      box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.06);
+      box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.5);
       display: flex;
       gap: 10px;
       z-index: 100;
@@ -594,11 +649,11 @@
 
     .btn-save-main {
       flex: 1;
-      background: var(--btn-color);
-      color: var(--btn-text);
+      background: linear-gradient(135deg, #d4a373 0%, #b88656 100%);
+      color: #101012;
       border: none;
       padding: 14px 18px;
-      font-size: 16px;
+      font-size: 15px;
       font-weight: 700;
       border-radius: 12px;
       cursor: pointer;
@@ -606,12 +661,14 @@
       align-items: center;
       justify-content: center;
       gap: 8px;
-      transition: opacity 0.15s ease, transform 0.15s ease;
+      box-shadow: 0 4px 18px rgba(212, 163, 115, 0.28);
+      transition: opacity 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
     }
 
     .btn-save-main:active {
       transform: scale(0.98);
-      opacity: 0.9;
+      opacity: 0.92;
+      box-shadow: 0 2px 8px rgba(212, 163, 115, 0.15);
     }
 
     /* Toast Notification */
@@ -620,13 +677,14 @@
       top: calc(20px + env(safe-area-inset-top, 0px));
       left: 50%;
       transform: translateX(-50%) translateY(-100px);
-      background: #1c1c1e;
+      background: #17171a;
+      border: 1px solid var(--border-color);
       color: #ffffff;
       padding: 12px 20px;
       border-radius: 24px;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 600;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
       transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
       z-index: 999;
       display: flex;
@@ -648,6 +706,9 @@
   <div class="container">
     <!-- Header Card -->
     <div class="header-card">
+      <div class="brand-bar">
+        <span class="brand-title">БЕЙНИ • РЕСТОРАННАЯ ВЕДОМОСТЬ</span>
+      </div>
       <div class="header-top">
         <div class="invoice-title-wrap">
           <div class="invoice-title">
@@ -767,16 +828,16 @@
         }
       } catch (e) {}
 
-      // Theme colors & bottom bar
+      // Beyni Craft Ledger Theme colors
       try {
-        if (tg.themeParams?.bg_color) {
-          document.documentElement.style.setProperty('--bg-color', tg.themeParams.bg_color);
-          if (typeof tg.setHeaderColor === 'function') {
-            tg.setHeaderColor(tg.themeParams.bg_color);
-          }
+        if (typeof tg.setHeaderColor === 'function') {
+          tg.setHeaderColor('#101012');
         }
-        if (typeof tg.setBottomBarColor === 'function' && tg.themeParams?.secondary_bg_color) {
-          tg.setBottomBarColor(tg.themeParams.secondary_bg_color);
+        if (typeof tg.setBackgroundColor === 'function') {
+          tg.setBackgroundColor('#101012');
+        }
+        if (typeof tg.setBottomBarColor === 'function') {
+          tg.setBottomBarColor('#17171a');
         }
       } catch (e) {}
     }
